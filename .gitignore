@@ -1,4 +1,7 @@
- backups/
+backups/
+**/backups/
+*.conf
 *.retry
 token.yml
 files/
+devnull

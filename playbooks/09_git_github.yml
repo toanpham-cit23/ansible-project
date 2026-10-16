@@ -5,67 +5,89 @@
   gather_facts: no
   vars_files: ../token.yml
   vars:
+    project_dir: /root/ansible-project
     github_repo: "https://{{ github_token }}@github.com/toanpham-cit23/ansible-project.git"
   
   tasks:
-    - name: Ensure git installed
-      ansible.builtin.shell: |
-        apk info -e git > /dev/null 2>&1 || apk add git
-      changed_when: false
+    - name: Write giignore file
+      ansible.builtin.copy:
+        dest: "{{ project_dir }}/.gitignore"
+        content: |
+          backups/
+          **/backups/
+          *.conf
+          *.retry
+          token.yml
+          files/
+          devnull
 
-    - name: Create gitignore
-      ansible.builtin.shell: |
-        cd {{ playbook_dir }}/..
-        echo " backups/" > .gitignore
-        echo "*.retry" >>  .gitignore
-        echo "token.yml" >> .gitignore
-        echo "files/" >> .gitignore
-      changed_when: false
-
-    - name: Initialize repository and set remote
-      ansible.builtin.shell: |
-        cd {{ playbook_dir }}/..
-        git init 2> /dev/null
-        git config user.name "Ansible Deploy Bot"
-        git config user.email "ansible@localhost"
-        git remote remove origin 2> /dev/null
-        git remote add origin {{ github_repo }}
-        git branch -M main
-      changed_when: false
-
-    - name: Add all project files including playbooks
-      ansible.builtin.shell: |
-        cd {{ playbook_dir }}/..
-        git rm -r --cached files 2> /dev/null
-        git rm -r --cached backups 2> /dev/null
-        git add -A
-      changed_when: true
+    - name: Untrack playbooks backups
+      ansible.builtin.command: git rm -r --cached playbooks/backups
+      args:
+        chdir: "{{ project_dir }}"
       failed_when: false
 
-    - name: Commit project changes
-      ansible.builtin.shell: |
-        cd {{ playbook_dir }}/..
-        git add -A
-        git commit -m "update $(date +%Y%m%d-%H%M%S)" || echo "NO_CHANGES"
+    - name: Untrack root backups
+      ansible.builtin.command: git rm -r --cached backups
+      args:
+        chdir: "{{ project_dir }}"
+      failed_when: false
+
+    - name: Untrack files folder
+      ansible.builtin.command: git rm -r --cached files
+      args:
+        chdir: "{{ project_dir }}"
+      failed_when: false
+
+    - name: Init repo
+      ansible.builtin.command: git init
+      args:
+        chdir: "{{ project_dir }}"
+
+    - name: Configure git user
+      ansible.builtin.command: git config user.name Ansible-Deploy-Bot
+      args:
+        chdir: "{{ project_dir }}"
+      failed_when: false
+
+    - name: Add remote
+      ansible.builtin.shell: git remote remove origin 2> /dev/null; git remote add origin {{ github_repo }}
+      args:
+        chdir: "{{ project_dir }}"
+      failed_when: false
+
+    - name: Set branch main
+      ansible.builtin.command: git branch -M main
+      args:
+        chdir: "{{ project_dir }}"
+      failed_when: false
+
+    - name: Stage all files
+      ansible.builtin.command: git add -A
+      args:
+        chdir: "{{ project_dir }}"
       register: git_commit
-      changed_when: "'NO_CHANGES' not in git_commit.stdout"
       failed_when: false
+      changed_when: git_commit.rc == 0
 
-    - name: Push to GitHub
-      ansible.builtin.shell: |
-        cd /root/ansible-project
-        git push -u origin main 2>&1
+    - name: Push to Github
+      ansible.builtin.command: git push -u origin main
+      args:
+        chdir: "{{ project_dir }}"
       register: git_push
-      failed_when: false
-
-    - name: Verify playbooks are tracked
-      ansible.builtin.shell: |
-        cd {{ playbook_dir }}/..
-        git ls-files | grep -c "^playbooks/" || echo 0
-      register: playbooks_count
-      changed_when: false
       failed_when: false
 
     - name: Result
       ansible.builtin.debug:
-        msg: "Playbooks tracked: {{ playbooks_count.stdout }} files - push: {{ git_push.stdout_lines | default([]) | last | default('done') }}"
+        var: git_push.stdout_lines
+
+    - name: Count tracked backups
+      ansible.builtin.command: git ls-files
+      args:
+        chdir: "{{ project_dir }}"
+      register: all_files
+      changed_when: false
+
+    - name: Show tracked file count
+      ansible.builtin.debug:
+        var: all_files.stdout_lines
