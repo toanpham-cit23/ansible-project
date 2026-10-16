@@ -7,3 +7,4 @@
 - import_playbook: 05_acl.yml
 - import_playbook: 06_backup.yml
 - import_playbook: 07_check.yml
+- import_playbook: 09_git_github.yml
