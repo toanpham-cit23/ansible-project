@@ -71,11 +71,15 @@
       changed_when: git_commit.rc == 0
 
     - name: Push to Github
-      ansible.builtin.command: git push -u origin main
+      ansible.builtin.command: git push -u origin main 2>&1
       args:
         chdir: "{{ project_dir }}"
       register: git_push
       failed_when: false
+
+    - name: Push verdict
+      ansible.builtin.debug:
+        msg: "{{ 'PUSH_FAILED - see output above' if git_push.rc !=0 else 'PUSH_OK' }}"
 
     - name: Result
       ansible.builtin.debug:
