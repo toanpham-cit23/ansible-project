@@ -1,0 +1,96 @@
+
+---
+- name: Backup Configuration for Routers
+  hosts: routers
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Get timestamp from router
+      ansible.builtin.command: date +%Y%m%d-%H%M%S
+      register: timestamp_result
+      changed_when: false
+    
+    - name: Set backup filename
+      ansible.builtin.set_fact:
+        backup_file: "/tmp/backups/{{ inventory_hostname}}-frr-{{ timestamp_result.stdout | trim }}.conf"
+
+    - name: Creater backup directory on router
+      ansible.builtin.file:
+        path: /tmp/backups
+        state: directory
+        mode: '0755'
+
+    - name: Diagnose vtysh availability and output
+      ansible.builtin.shell: |
+        echo "--- which vtysh:   $(command -v vtysh || echo NOT_FOUND)"
+        echo "--- current user:  $(whoami)"
+        echo "--- raw vtysh output test:"
+        TERM=dumb vtysh -c 'show version' 2>&1 | head -5
+      register: diag_result
+      changed_when: false
+      failed_when: false
+
+    - name: Show diagnostics
+      ansible.builtin.debug:
+        var: diag_result.stdout_lines
+
+    - name: Backup running configuration to local file
+      ansible.builtin.shell: |
+        TERM=dumb vtysh -c 'show running-config' > "{{ backup_file }}" 2>&1
+        if [ ! -s "{{ backup_file }}" ]; then
+          TERM=dumb vtysh -c 'show run' > "{{ backup_file }}" 2>&1
+        fi
+        if [ -s "{{ backup_file }}" ]; then
+          echo "BACKUP_OK"
+        else
+          echo "BACKUP_FAILED - vtysh gave no output and /etc/frr/frr.conf missing/empty"
+          exit 1
+        fi
+      register: backup_result
+
+    - name: Result
+      ansible.builtin.debug:
+        var: backup_result.stdout_lines
+
+    - name: Fetch backup file to control node
+      ansible.builtin.fetch:
+        src: "{{ backup_file }}"
+        dest: "./backups/{{ inventory_hostname }}/"
+        falt: yes
+      register: fetch_result
+
+    - name: Show fetch result
+      ansible.builtin.debug:
+        var: fetch_result.dest
+
+    - name: Read backup file content
+      ansible.builtin.slurp:
+        src: "{{ backup_file }}"
+      register: backup_content
+
+    - name: Analyze backup content
+      ansible.builtin.set_fact:
+        backup_config: "{{ backup_content.content | b64decode }}"
+        backup_lines: "{{ (backup_content.content | b64decode).split('\n') | length }}"
+
+    - name: Show backup statistics and preview
+      ansible.builtin.debug:
+        msg:
+          - "Backup file: {{ backup_file }}"
+          - "Total lines: {{ backup_lines }}"
+          - "First 15 lines of backup:"
+          - "{{ (backup_content.content | b64decode).split('\n')[:15] }}"
+
+
+    - name: Verify backup contains router configuration
+      ansible.builtin.set_fact:
+        content_check: "{{ 'CONTENT_OK' if ('frr' in backup_config or 'interface' in backup_config or 'hostname' in backup_config) else 'CONTENT_INVALID' }}"
+
+    - name: Final status
+      ansible.builtin.debug:
+        msg: >-
+          Backup completed on {{ inventory_hostname }}:
+          {{ 'SUCCESS - file fetched to ' ~ fetch_result.dest
+            if (backup_lines | int > 0 and content_check == 'CONTENT_OK')
+            else 'FAILED - check backup preview above' }}

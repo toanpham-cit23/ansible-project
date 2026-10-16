@@ -1,0 +1,52 @@
+---
+- name: NTP Configuration for Routers
+  hosts: routers
+  gather_facts: no
+  tasks:
+    - name: Clean old packages
+      ansible.builtin.file:
+        path: /tmp/ntp-pkgs
+        state: absent
+    - name: Create /tmp/ntp-pkgs
+      ansible.builtin.file:
+        path: /tmp/ntp-pkgs
+        state: directory
+        mode: '0755'
+    - name: Copy tzdata package to router
+      ansible.builtin.copy:
+        src: /root/ansible-project/files/tzdata/tzdata.apk
+        dest: /tmp/ntp-pkgs/tzdata.apk
+        mode: '0644'
+    - name: Configure NTP server
+      ansible.builtin.lineinfile:
+        path: /etc/chrony/chrony.conf
+        line: "server 192.168.23.10 iburst"
+        state: present
+      register: ntp_config
+    - name: Install tzdata from local file
+      ansible.builtin.shell: apk add --allow-untrusted --no-network /tmp/ntp-pkgs/tzdata.apk
+      register: tzdata_install
+      changed_when: "'Installing tzdata' in tzdata_install.stdout or 'Installing tzdata' in tzdata_install.stderr"
+    - name: Set timezone to Asia/Bangkok
+      ansible.builtin.shell: |
+        cp /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
+        echo "Asia/Bangkok" > /etc/timezone
+    - name: Restart chrony if config changed
+      ansible.builtin.shell: rc-service chronyd restart
+      when: ntp_config.changed
+    - name: Wait for sync
+      ansible.builtin.pause:
+        seconds: 10
+    - name: Check NTP status
+      ansible.builtin.shell: |
+        echo "=== Date ==="
+        date
+        echo "=== Timezone ==="
+        cat /etc/timezone
+        echo "=== NTP Tracking ==="
+        chronyc tracking | head -5
+      register: status
+      ignore_errors: yes
+    - name: Show NTP status
+      ansible.builtin.debug:
+        msg: "{{ status.stdout_lines }}"

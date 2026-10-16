@@ -1,0 +1,9 @@
+---
+- import_playbook: 01_fix_frr.yml
+- import_playbook: 00_hostname.yml
+- import_playbook: 02_ospf.yml
+- import_playbook: 03_ntp.yml
+- import_playbook: 04_snmp.yml
+- import_playbook: 05_acl.yml
+- import_playbook: 06_backup.yml
+- import_playbook: 07_check.yml

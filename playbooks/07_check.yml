@@ -1,0 +1,153 @@
+---
+- name: Router Health and Configuration Check
+  hosts: routers
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Check for available updates on controller
+      ansible.builtin.shell: |
+        apk update -q >/dev/null 2>&1
+        UPDATES=$(apk version -l '<' 2>/dev/null | grep -c '^' || true)
+        if [ "$UPDATES" -gt 0 ]; then
+          echo "UPDATES_AVAILABLE: $UPDATES packages"
+          apk version -l '<' 2>/dev/null
+        else
+          echo "NO_UPDATES_AVAILABLE"
+        fi
+      delegate_to: localhost
+      run_once: true
+      register: controller_update_check
+      changed_when: "'UPDATE_AVAILABLE' in controller_update_check.stdout"
+      failed_when: false
+
+    - name: Apply controller updates if available
+      ansible.builtin.shell: |
+        apk upgrate --no-progress 2>&1 | tail -5
+      delegate_to: localhost
+      run_once: true
+      when: "'UPDATES_AVAILABLE' in controller_update_check.stdout"
+      register: controller_upgrade
+      changed_when: true
+      failed_when: false
+
+    - name: Show controller update status (up to date)
+      ansible.builtin.set_fact:
+        update_status: UP_TO_DATE
+      when: "'NO_UPDATES' in controller_update_check.stdout"
+
+    - name: Show controller update status (updated)
+      ansible.builtin.set_fact:
+        update_status: UPDATED
+      when: "'NO_UPDATES' not in controller_update_check.stdout"
+
+    - name: Show controller update status
+      ansible.builtin.debug:
+        msg: "Controller {{ update_status }}"
+
+    - name: Check dependencies to run
+      ansible.builtin.shell: |
+        apk info -e frr > /dev/null 2>&1
+        if [ $? -eq 0 ]; then echo DEP_OK_frr; else echo DEP_MISSING_frr; fi
+        apk info -e python3 > /dev/null 2>&1
+        if [ $? -eq 0 ]; then echo DEP_OK_python3; else echo DEP_MISSING_python3; fi
+        command -v vtysh > /dev/null 2>&1
+        if [ $? -eq 0 ]; then echo DEP_OK_vtysh; else echo DEP_MISSING_vtysh; fi
+      register: dep_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show dependency check
+      ansible.builtin.debug:
+        var: dep_check.stdout_lines
+
+    - name: Check if router is configured
+      ansible.builtin.shell: |
+        SHOWRUN=$(TERM=dumb vtysh -c 'show run' 2>&1)
+        echo "$SHOWRUN" | grep -q "hostname {{ inventory_hostname }}" && echo "CFG_OK: hostname" || echo "CFG_MISSING: hostname (00_hostname.yml)"
+        echo "$SHOWRUN" | grep -q "interface lo" && echo "CFG_OK: loopback" || echo "CFG_MISSING: loopback (01_fix_frr.yml)"
+        echo "$SHOWRUN" | grep -q "router ospf" && echo "CFG_OK: ospf" || echo "CFG_MISSING: ospf (02_ospf.yml)"
+        echo "$SHOWRUN" | grep -q "access-list" && echo "CFG_OK: acl" || echo "CFG_MISSING: acl (05_acl.yml)"
+      register: config_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show configuration check
+      ansible.builtin.debug:
+        var: config_check.stdout_lines
+
+    - name: Check backup exists on router
+      ansible.builtin.shell: |
+        if ls /tmp/backups/{{ inventory_hostname }}-frr-*.conf >/dev/null 2>&1; then
+          echo "BACKUP_OK: $(ls /tmp/backup/{{ inventory_hostname }}-frr-*.conf | wc -l) file(s)"
+          ls -lh /tmp/backups/*.conf | awk '{print $NF, "("$5")"}'
+        else
+          echo "BACKUP_MISSING (06_backup.yml)"
+        fi
+      register: backup_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check backup exists on controller
+      ansible.builtin.stat:
+        path: "./backups/{{ inventory_hostname }}"
+      delegate_to: localhost
+      register: controller_backup_check
+      failed_when: false
+
+    - name: Show backup check
+      ansible.builtin.debug:
+        msg:
+          - "{{ backup_check.stdout_lines }}"
+          - "Controller copy: {{ 'PRESENT' if controller_backup_check.stat.exists
+                                             else 'MISSING (06_backup.yml)' }}"
+
+    - name: Check interfaces are up
+      ansible.builtin.shell: |
+        for IFACE in $(ls /sys/class/net); do
+          STATE=$(cat /sys/class/net/$IFACE/operstate)
+          echo "IFACE: $IFACE state=$STATE"
+        done
+      register: iface_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show interface check
+      ansible.builtin.debug:
+        var: iface_check.stdout_lines
+
+    - name: Check FRR service status
+      ansible.builtin.shell: |
+        ps | grep zebra | grep -v grep > /dev/null && echo "SERVICE_OK: frr running" || echo "SERVICE_DOWN: frr not running"
+        ps | grep ospfd | grep -v grep > /dev/null || echo "SERVICE_WARN: ospfd not running"
+      register: service_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show service status
+      ansible.builtin.debug:
+        var: service_check.stdout_lines
+
+    - name: Collect missing configurations
+      ansible.builtin.set_fact:
+        missing_items: >-
+          {{ (dep_check.stdout_lines +
+              config_check.stdout_lines +
+              backup_check.stdout_lines +
+              service_check.stdout_lines)
+              | select('match', '.*MISSING.*|.*DOWN.*')
+              | list }}
+
+    - name: Show missing items
+      ansible.builtin.debug:
+        var: missing_items
+
+    - name: Final status
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'ALL CHECK PASSED on ' ~ inventory_hostname ~
+             ' - router fully configured, continuing to the end'
+             if (missing_items | length == 0)
+             else 'ATTENTION ' ~ inventory_hostname ~
+                  ' - configuration needed, run these playbooks: ' ~
+                  (missing_items | join(' | ')) }}

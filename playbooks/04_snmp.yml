@@ -1,0 +1,68 @@
+
+---
+- name: SNMP Configuration
+  hosts: routers
+  gather_facts: no
+  tasks:
+    - name: Clean old packages
+      ansible.builtin.file:
+        path: /tmp/snmp-pkgs
+        state: absent
+    - name: Create /tmp/snmp.pkgs directory
+      ansible.builtin.file:
+        path: /tmp/snmp-pkgs
+        state: directory
+        mode: '0755'
+    - name: Copy all SNMP package to router
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: /tmp/snmp-pkgs
+        mode: '0644'
+      with_fileglob:
+        - /root/ansible-project/files/snmp/*.apk
+    - name: Install all packages from local file
+      ansible.builtin.shell: apk add --allow-untrusted --no-network /tmp/snmp-pkgs/*.apk
+      register: snmp_install
+    - name: Restart FRR after package install
+      ansible.builtin.shell: |
+        rc-service frr stop
+        sleep 2
+        rc-service frr start
+        sleep 3
+      register: frr_restart
+    - name: Create SNMP config file
+      ansible.builtin.copy:
+        content: |
+          # SNMP Configuration
+          rocommunity public 192.168.23.0/24
+          syslocation "Data Center"
+          syscontact admin@company.local
+          agentaddress udp:161
+          master agentx
+        dest: /etc/snmp/snmpd.conf
+        mode: '0644'
+    - name: Verify snmpd binary exists
+      ansible.builtin.shell: which snmpd || ls /usr/sbin/snmpd
+      register: snmpd_library
+      ignore_errors: yes
+    - name: Show snmpd binary path
+      ansible.builtin.debug:
+        msg: "snmpd binary: {{ snmpd_library.stdout | default('NOT FOUND') }}"
+    - name: Enable and start snmpd service
+      ansible.builtin.shell: |
+        if [ -f /etc/init.d/snmpd ]; then
+          rc-update add snmpd
+          rc-service snmpd start
+          sleep 2
+          rc-service snmpd status
+        else
+          echo "Service file /etc/init.d/snmpd not found"
+          ls /etc/init.d/ | grep -i snmp || echo "No SNMP service files"
+        fi
+      register: snmpd_start
+    - name: Wait for snmpd to be ready
+      ansible.builtin.pause:
+        seconds: 3
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ snmpd_start.stdout_lines }}"

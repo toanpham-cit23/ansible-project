@@ -1,0 +1,96 @@
+---
+- name: Force start FRR and Apply Loopback
+  hosts: routers
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Detect FRR service name
+      ansible.builtin.shell: |
+        if rc-service frr status > /dev/null 2>&1; then
+          echo FRR
+        elif rc-service zebra status > /dev/null 2>&1; then
+          echo ZEBRA
+        elif ls /etc/init.d/frr > /dev/null 2>&1; then
+          echo FRR_STOPPED
+        elif ls /etc/init.d/zebra > /dev/null 2>&1; then
+          echo ZEBRA_STOPPED
+        else
+          echo NO_INIT_SCRIPT
+        fi
+      register: frr_detect
+      changed_when: false
+      failed_when: false
+
+    - name: Show detection result
+      ansible.builtin.debug:
+        var: frr_detect.stdout
+
+    - name: Enable and force start frr service
+      ansible.builtin.shell: |
+        rc-update add frr default
+        rc-service frr stop
+        rc-service frr start
+        sleep 2
+        rc-service frr status
+      register: frr_start_frr
+      when: frr_detect.stdout != "ZEBRA_STOPPED"
+      failed_when: false
+
+    - name: Enable and force start zebra service
+      ansible.builtin.shell: |
+        rc-update add zebra default
+        rc-update add ospfd default
+        rc-service zebra restart
+        rc-service ospfd restart
+        sleep 2
+      register: frr_start_zebra
+      when: frr_detect.stdout == "ZEBRA_STOPPED"
+      failed_when: false
+
+    - name: Enable ospfd daemon in FRR config
+      ansible.builtin.shell: |
+        sed -i 's/ospfd=no/ospfd=yes/' /etc/frr/daemons
+        rc-service frr restart
+        sleep 2
+      register: ospfd_enable
+      failed_when: false
+
+    - name: Verify FRR daemons running
+      ansible.builtin.shell: |
+        ps | grep zebra | grep -v grep > /dev/null && echo ZEBRA_RUNNING || echo ZEBRA_DEAD
+        ps | grep ospfd | grep -v grep > /dev/null && echo OSPFD_RUNNING || echo OSPFD_DEAD
+        vtysh -c 'show version' > /dev/null 2>&1 && echo VTYSH_OK || echo VTYSH_FAIL
+      register: daemon_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show daemin status
+      ansible.builtin.debug:
+        var: daemon_check.stdout_lines
+
+    - name: Configure loopback interface
+      ansible.builtin.shell: |
+        vtysh -c 'conf t' -c 'interface lo' -c 'ip address {{ loopback_ip }}/32' -c 'end' -c 'wr mem'
+      register: lo_result
+      when: "'VTYSH_OK' in daemon_check.stdout"
+      failed_when: false
+
+    - name: Show loopback result
+      ansible.builtin.debug:
+        var: lo_result.stdout_lines
+
+    - name: Verify loopback in running config
+      ansible.builtin.shell: |
+        vtysh -c 'show run' | grep -q "interface lo" && echo LOOPBACK_OK || echo LOOPBACK_MISSING
+      register: lo_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Show loopback verification
+      ansible.builtin.debug:
+        var: lo_verify.stdout
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} loopback={{ loopback_ip }} result={{ lo_verify.stdout }}"

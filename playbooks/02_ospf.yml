@@ -1,0 +1,13 @@
+---
+- name: OSPF Configuration for Routers
+  hosts: routers
+  gather_facts: no
+  tasks:
+    - name: Enable OSPF
+      ansible.builtin.shell: |
+        vtysh -c 'conf t' -c 'router ospf' -c 'network {{ loopback_ip }}/32 area 0' -c 'end' -c 'wr mem'
+      register: ospf_result
+      failed_when: false
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ ospf_result.stdout }}"
