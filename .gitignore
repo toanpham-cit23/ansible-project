@@ -5,3 +5,4 @@ backups/
 token.yml
 files/
 devnull
+.vault_pass

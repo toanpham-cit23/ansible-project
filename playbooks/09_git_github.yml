@@ -9,7 +9,26 @@
     github_repo: "https://{{ github_token }}@github.com/toanpham-cit23/ansible-project.git"
   
   tasks:
-    - name: Write giignore file
+    - name: Safety check - never push plaintext token
+      ansible.builtin.shell: | 
+        if grep -q ANSIBLE_VAULT {{ project_dir }}/token.yml; then
+          echo "TOKEN_ENCRYPTED"
+        else
+          echo "TOKEN_PLAINTEXT"
+        fi
+      register: token_safety
+      changed_when: false
+
+    - name: Stop push if token is not encrypted
+      ansible.builtin.fail:
+        msg: "DANGER - token.yml is plaintext. Run 08_vault.yml first, then push."
+      when: token_safety.stdout != "TOKEN_ENCRYPTED"
+
+    - name: Show token safety result
+      ansible.builtin.debug:
+        var: token_safety.stdout_lines
+
+    - name: Write gitgnore file
       ansible.builtin.copy:
         dest: "{{ project_dir }}/.gitignore"
         content: |
@@ -20,6 +39,19 @@
           token.yml
           files/
           devnull
+          .vault_pass
+
+    - name: Untrack token file
+      ansible.builtin.command: git rm --cached token.yml
+      args:
+        chdir: "{{ project_dir }}"
+      failed_when: false
+
+    - name: Untrack vault pass file
+      ansible.builtin.command: git rm --cached .vault_pass
+      args:
+        chdir: "{{ project_dir }}"
+      failed_when: false
 
     - name: Untrack playbooks backups
       ansible.builtin.command: git rm -r --cached playbooks/backups
@@ -71,7 +103,7 @@
       changed_when: git_commit.rc == 0
 
     - name: Push to Github
-      ansible.builtin.command: git push -u origin main 2>&1
+      ansible.builtin.shell: git push -u origin main 2>&1
       args:
         chdir: "{{ project_dir }}"
       register: git_push
@@ -83,7 +115,7 @@
 
     - name: Result
       ansible.builtin.debug:
-        var: git_push.stdout_lines
+        var: git_push
 
     - name: Count tracked backups
       ansible.builtin.command: git ls-files

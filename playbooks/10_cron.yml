@@ -1,0 +1,78 @@
+---
+- name: Schedule automatic FRR backups with cron
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    project_dir: /root/ansible-project
+    log_file: /var/log/ansible_backup.log
+    interval_hours: "12"
+  tasks:
+    - name: Find the ansible-playbook program
+      ansible.builtin.shell: command -v ansible-playbook
+      register: ap_path
+      changed_when: false
+      failed_when: false
+
+    - name: Show the found path
+      ansible.builtin.debug:
+        var: ap_path.stdout
+
+    - name: Stop if ansible-playbook was not found
+      ansible.builtin.fail:
+        msg: "ansible-playbook not found in PATH, cron cannot run it"
+      when: ap_path.stdout | trim | length == 0
+
+    - name: Check if cronf is running
+      ansible.builtin.command: rc-service crond status
+      register: crond_status
+      changed_when: false
+      failed_when: false
+
+    - name: Start crond if it is not running
+      ansible.builtin.command: rc-service crond start
+      when: crond_status.rc != 0 or 'stopped' in crond_status.stdout
+
+    - name: Enable crond at boot
+      ansible.builtin.command: rc-update add crond default
+      register: crond_boot
+      changed_when: "'already installed' not in crond_boot.stdout"
+
+    - name: Create the backup runner script
+      ansible.builtin.copy:
+        dest: "{{ project_dir }}/run_backup.sh"
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          export HOME=/root
+          LOG={{ log_file }}
+
+          # keep the log small - last 300 lines if it grows over 1 MB
+          if [ -f "$LOG" ] && [ "$(wc -c "$LOG")" -gt 1024000 ]; then
+            tail -n 300 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+          fi
+
+          echo "=== $(date) ===" >> "$LOG"
+          cd {{ project_dir }}
+          {{ ap_path.stdout | trim }} playbooks/06_backups.yml >> "$LOG" 2>&1
+
+    - name: Add the cron job to crontab
+      ansible.builtin.blockinfile:
+        path: /etc/crontabs/root
+        create: yes
+        marker: "# {mark} ANSIBLE-FRR-BACKUP"
+        block: |
+          0 */{{ interval_hours }} * * * {{ project_dir }}/run_backup.sh
+
+    - name: Read the final crontab
+      ansible.builtin.command: cat /etc/crontabs/root
+      register: cron_final
+      changed_when: false
+
+    - name: Show final crontab content
+      ansible.builtin.debug:
+        var: cron_final.stdout_lines
+
+    - name: Done message
+      ansible.builtin.debug:
+        msg: "CRON JOB READY - run every {{ interval_hours }}, log at {{ log_file }}"

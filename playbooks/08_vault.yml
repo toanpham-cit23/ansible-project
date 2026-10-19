@@ -1,0 +1,67 @@
+---
+- name: Encrypt secrets with Ansible Vault
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    project_dir: /root/ansible-project
+    vault_pass_file: "{{ project_dir }}/.vault_pass"
+    token_file: "{{ project_dir }}/token.yml"
+  tasks:
+    - name: Check vault password file exists
+      ansible.builtin.stat:
+        path: "{{ vault_pass_file }}"
+      register: vault_pass_stat
+      changed_when: false
+
+    - name: Stop if vault password file is missing
+      ansible.builtin.fail:
+        msg: "Missing .vault_pass. Create it by hand first, see the BEFORE steps."
+      when: not vault_pass_stat.stat.exists
+
+    - name: Create token file if missing
+      ansible.builtin.copy:
+        dest: "{{ token_file }}"
+        content: |
+          github_token: YOUR_TOKEN
+        force: no
+      register: token_create
+
+    - name: Show token create result
+      ansible.builtin.debug:
+        var: token_create
+
+    - name: Check state of token file
+      ansible.builtin.shell: |
+        if grep -q ANSIBLE_VAULT {{ token_file }}; then
+          echo "ENCRYPTED"
+        elif grep -q YOUR_TOKEN {{ token_file }}; then
+          echo "PLACEHOLDER"
+        else
+          echo "PLAINTEXT"
+        fi
+      register: token_state
+      changed_when: false
+
+    - name: Show token file state
+      ansible.builtin.debug:
+        var: token_state.stdout_lines
+
+    - name: Stop if token is still the placeholder
+      ansible.builtin.fail:
+        msg: "token.yml still has YOUR_TOKEN. Edit it with nano and put the real token, then run again."
+      when: token_state.stdout == "PLACEHOLDER"
+
+    - name: Encrypt token file
+      ansible.builtin.shell:
+        ansible-vault encrypt {{ token_file }} --vault-password-file {{ vault_pass_file }}
+      when: token_state.stdout == "PLAINTEXT"
+      register: encrypt_result
+
+    - name: Show encrypt result
+      ansible.builtin.debug:
+        var: encrypt_result.stdout_lines
+
+    - name: Final status
+      ansible.builtin.debug:
+        msg: "TOKEN IS ENCRYPTED AND SAFE TO PUSH"

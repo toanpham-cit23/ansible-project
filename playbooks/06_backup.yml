@@ -15,6 +15,27 @@
       ansible.builtin.set_fact:
         backup_file: "/tmp/backups/{{ inventory_hostname}}-frr-{{ timestamp_result.stdout | trim }}.conf"
 
+    - name: Remove duplicate backups on router (same content, keep newest 3 protected)
+      ansible.builtin.shell: |
+        cd /tmp/backups
+        md5sum *.conf 2>/dev/null | sort -k2 -r > /tmp/backup_hashes
+        DUPES=$(awk 'NR<=3 {seen[$1]=1; next} seen[$1]++ {print $2}' /tmp/backup_hashes)
+        if [ -n "$DUPES" ]; then
+          echo "REMOVED_DUPLICATES"
+          echo "$DUPES"
+          echo "$DUPES" | xargs rm -f
+        else
+          echo "NO_DUPLICATES"
+        fi
+        echo "KEPT $(ls *.conf 2>/dev/null | wc -l) BACKUPS"
+        rm -f /tmp/backup-hashes
+      register: dedupe_router
+      changed_when: "'REMOVED_DUPLICATES' in dedupe_router.stdout"
+
+    - name: Show router dedupe result
+      ansible.builtin.debug:
+        var: dedupe_router.stdout_lines
+
     - name: Creater backup directory on router
       ansible.builtin.file:
         path: /tmp/backups
@@ -35,23 +56,46 @@
       ansible.builtin.debug:
         var: diag_result.stdout_lines
 
-    - name: Backup running configuration to local file
+    - name: Backup config only if it changed
       ansible.builtin.shell: |
-        TERM=dumb vtysh -c 'show running-config' > "{{ backup_file }}" 2>&1
-        if [ ! -s "{{ backup_file }}" ]; then
-          TERM=dumb vtysh -c 'show run' > "{{ backup_file }}" 2>&1
+        CURRENT=/tmp/frr_current_{{ inventory_hostname }}.conf
+        TERM=dumb vtysh -c 'show running-config' > "$CURRENT" 2>&1
+        if [ ! -s "$CURRENT ]; then
+          TERM=dumb vtysh -c 'show run' > "$CURRENT" 2>&1
         fi
-        if [ -s "{{ backup_file }}" ]; then
-          echo "BACKUP_OK"
-        else
-          echo "BACKUP_FAILED - vtysh gave no output and /etc/frr/frr.conf missing/empty"
+        if [ -s "$CURRENT" ] && [ -s /etc/frr/frr.conf ]; then
+          cp /etc/frr/frr.conf "$CURRENT"
+        fi
+        if [ ! -s "$CURRENT" ]; then
+          echo "BACKUP_FAILED"
           exit 1
         fi
+        NEWEST=$(ls /tmp/backups/*.conf 2>/dev/null | sort | tail -1)
+        if [ -n "$NEWEST" ] && cmp -s "$CURRENT" "$NEWEST"; then
+          echo "$NEWEST" > /tmp/backup_path.txt
+          echo "NO_CHANGE"
+        else
+          cp "$CURRENT" "{{ backup_file }}"
+          echo "{{ backup_file }}" > /tmp/backup_path.txt
+          echo "BACKUP_CREATED"
+        fi
+        rm -f "$CURRENT"
       register: backup_result
+      failed_when: backup_result.rc != 0 or 'BACKUP_FAILED' in backup_result.stdout
+      changed_when: "'BACKUP_CREATED' in backup_result.stdout"
 
     - name: Result
       ansible.builtin.debug:
         var: backup_result.stdout_lines
+
+    - name: Read the backup path saved by the script
+      ansible.builtin.command: cat /tmp/packup_path.txt
+      register: path_result
+      changed_when: false
+
+    - name: Point backup_file to the real file
+      ansible.builtin.set_fact:
+        backup_file: "{{ path_result.stdout | trim }}"
 
     - name: Fetch backup file to control node
       ansible.builtin.fetch:
@@ -59,6 +103,30 @@
         dest: "./backups/{{ inventory_hostname }}/"
         falt: yes
       register: fetch_result
+
+    - name: Remove duplicate backups on control node (keep newest 3 protected)
+      ansible.builtin.shell: |
+        BKDIR={{ playbook_dir }}/../backups/{{ inventory_hostname }}
+        mkdir -p "$BKDIR"
+        cd "$BKDIR"
+        md5sum *.conf 2>/dev/null | sort -k2 -r > /tmp/hash_{{ inventory_hostname }}
+        DUPES=$(awk 'NR<=3 {seen[$1]=1; next} seen[$1}++ {print $2}' /tmp/hash_{{ inventory_hostname }})
+        if [ -n "$DUPES" ]; then
+          echo "REMOVED_DUPLICATES"
+          echo "$DUPES"
+          echo "$DUPES" | xarg rm -f
+        else
+          echo "NO_DUPLICATES"
+        fi
+        echo "KEPT $(ls *.conf 2>/dev/null |wc -l) BACKUPS"
+        rm -f /tmp/hash_{{ inventory_hostname }}
+      delegate_to: localhost
+      register: dedupe_control
+      changed_when: "'REMOVED_DUPLICATES' in dedupe_control.stdout"
+
+    - name: Show control node dedupe result
+      ansible.builtin.debug:
+        var: dedupe_control.stdout_lines
 
     - name: Show fetch result
       ansible.builtin.debug:
@@ -81,7 +149,6 @@
           - "Total lines: {{ backup_lines }}"
           - "First 15 lines of backup:"
           - "{{ (backup_content.content | b64decode).split('\n')[:15] }}"
-
 
     - name: Verify backup contains router configuration
       ansible.builtin.set_fact:
