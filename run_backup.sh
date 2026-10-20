@@ -9,4 +9,5 @@ fi
 
 echo "=== $(date) ===" >> "$LOG"
 cd /root/ansible-project
-/usr/bin/ansible-playbook playbooks/06_backups.yml >> "$LOG" 2>&1
+AP=$(command -v ansible-playbook || echo /usr/bin/ansible-playbook)
+"$AP" playbooks/06_backup.yml >> "$LOG" 2>&1
