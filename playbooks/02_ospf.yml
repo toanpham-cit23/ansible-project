@@ -2,12 +2,57 @@
 - name: OSPF Configuration for Routers
   hosts: routers
   gather_facts: no
+  vars:
+    # The segment that actually carries the OSPF hellos.
+    # Without this network statement no adjacency can ever form.
+    lan_subnet: 192.168.23.0/24
+    ospf_area: "0"
   tasks:
-    - name: Enable OSPF
+    - name: Enable OSPF on the LAN segment and advertise the loopback
       ansible.builtin.shell: |
-        vtysh -c 'conf t' -c 'router ospf' -c 'network {{ loopback_ip }}/32 area 0' -c 'end' -c 'wr mem'
+        TERM=dumb vtysh \
+          -c 'conf t' \
+          -c 'router ospf' \
+          -c 'network {{ lan_subnet }} area {{ ospf_area }}' \
+          -c 'network {{ loopback_ip }}/32 area {{ ospf_area }}' \
+          -c 'passive-interface lo' \
+          -c 'end' \
+          -c 'wr mem'
       register: ospf_result
+      changed_when: "'%' not in ospf_result.stdout"
+      failed_when: "'Unknown command' in ospf_result.stdout or 'Incomplete command' in ospf_result.stdout"
+
+    - name: Show OSPF configuration output
+      ansible.builtin.debug:
+        var: ospf_result.stdout_lines
+
+    - name: Wait for adjacencies to come up
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Count OSPF neighbours in Full state
+      ansible.builtin.shell: |
+        TERM=dumb vtysh -c 'show ip ospf neighbor' 2>/dev/null | grep -c 'Full' || true
+      register: ospf_neighbors
+      changed_when: false
       failed_when: false
+
+    - name: Show neighbour table
+      ansible.builtin.shell: |
+        TERM=dumb vtysh -c 'show ip ospf neighbor' 2>&1 | head -10
+      register: ospf_neighbor_table
+      changed_when: false
+      failed_when: false
+
+    - name: Show neighbour table output
+      ansible.builtin.debug:
+        var: ospf_neighbor_table.stdout_lines
+
     - name: Result
       ansible.builtin.debug:
-        msg: "{{ ospf_result.stdout }}"
+        msg: >-
+          OSPF on {{ inventory_hostname }}: router-id={{ loopback_ip }}
+          | network={{ lan_subnet }} area {{ ospf_area }}
+          | neighbours in Full = {{ ospf_neighbors.stdout | trim }}
+          {{ '- OK' if (ospf_neighbors.stdout | trim | int) > 0
+             else '- WARNING: no adjacency yet, check that r1/r2/r3 are all reachable on the LAN' }}

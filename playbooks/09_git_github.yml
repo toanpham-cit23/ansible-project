@@ -3,12 +3,22 @@
   hosts: localhost
   connection: local
   gather_facts: no
-  vars_files: ../token.yml
   vars:
     project_dir: /root/ansible-project
-    github_repo: "https://{{ github_token }}@github.com/toanpham-cit23/ansible-project.git"
-  
+    github_repo: "https://{{ github_token | default('') }}@github.com/toanpham-cit23/ansible-project.git"
+
   tasks:
+    - name: Load token file if it exists
+      ansible.builtin.include_vars:
+        file: "{{ project_dir }}/token.yml"
+      failed_when: false
+      no_log: true
+
+    - name: Stop if the GitHub token is missing
+      ansible.builtin.fail:
+        msg: "{{ project_dir }}/token.yml not found or has no github_token. Run 08_vault.yml first."
+      when: github_token | default('') | length == 0
+
     - name: Safety check - never push plaintext token
       ansible.builtin.shell: | 
         if grep -q ANSIBLE_VAULT {{ project_dir }}/token.yml; then
@@ -28,18 +38,31 @@
       ansible.builtin.debug:
         var: token_safety.stdout_lines
 
-    - name: Write gitgnore file
+    # force: no -> keeps the tracked .gitignore intact, only creates it if missing
+    - name: Ensure gitignore exists
       ansible.builtin.copy:
         dest: "{{ project_dir }}/.gitignore"
+        force: no
         content: |
+          # Backups and generated configs - never commit router configs
           backups/
           **/backups/
           *.conf
           *.retry
+
+          # Secrets
           token.yml
+          .vault_pass
+
+          # Offline .apk packages (tzdata / snmp / zabbix).
+          # Intentionally not in git: copy them to files/ on the control node by hand.
           files/
           devnull
-          .vault_pass
+
+          # Misc
+          *.log
+          __pycache__/
+          .DS_Store
 
     - name: Untrack token file
       ansible.builtin.command: git rm --cached token.yml

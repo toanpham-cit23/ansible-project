@@ -12,11 +12,26 @@
         path: /tmp/ntp-pkgs
         state: directory
         mode: '0755'
+    - name: Check tzdata package on control node
+      ansible.builtin.stat:
+        path: /root/ansible-project/files/tzdata/tzdata.apk
+      delegate_to: localhost
+      register: tz_pkg
+      changed_when: false
+
+    - name: Warn when tzdata package is missing
+      ansible.builtin.debug:
+        msg: >-
+          WARNING - files/tzdata/tzdata.apk not found on the control node.
+          Timezone will stay at the default; NTP sync still continues.
+      when: not tz_pkg.stat.exists
+
     - name: Copy tzdata package to router
       ansible.builtin.copy:
         src: /root/ansible-project/files/tzdata/tzdata.apk
         dest: /tmp/ntp-pkgs/tzdata.apk
         mode: '0644'
+      when: tz_pkg.stat.exists
     - name: Configure NTP server
       ansible.builtin.lineinfile:
         path: /etc/chrony/chrony.conf
@@ -26,11 +41,19 @@
     - name: Install tzdata from local file
       ansible.builtin.shell: apk add --allow-untrusted --no-network /tmp/ntp-pkgs/tzdata.apk
       register: tzdata_install
+      when: tz_pkg.stat.exists
       changed_when: "'Installing tzdata' in tzdata_install.stdout or 'Installing tzdata' in tzdata_install.stderr"
     - name: Set timezone to Asia/Bangkok
       ansible.builtin.shell: |
-        cp /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
-        echo "Asia/Bangkok" > /etc/timezone
+        if [ -f /usr/share/zoneinfo/Asia/Bangkok ]; then
+          cp /usr/share/zoneinfo/Asia/Bangkok /etc/localtime
+          echo "Asia/Bangkok" > /etc/timezone
+          echo "TIMEZONE_SET"
+        else
+          echo "TIMEZONE_SKIPPED - tzdata not installed"
+        fi
+      register: tz_result
+      changed_when: "'TIMEZONE_SET' in tz_result.stdout"
     - name: Restart chrony if config changed
       ansible.builtin.shell: rc-service chronyd restart
       when: ntp_config.changed

@@ -18,12 +18,12 @@
       delegate_to: localhost
       run_once: true
       register: controller_update_check
-      changed_when: "'UPDATE_AVAILABLE' in controller_update_check.stdout"
+      changed_when: "'UPDATES_AVAILABLE' in controller_update_check.stdout"
       failed_when: false
 
     - name: Apply controller updates if available
       ansible.builtin.shell: |
-        apk upgrate --no-progress 2>&1 | tail -5
+        apk upgrade --no-progress 2>&1 | tail -5
       delegate_to: localhost
       run_once: true
       when: "'UPDATES_AVAILABLE' in controller_update_check.stdout"
@@ -76,10 +76,42 @@
       ansible.builtin.debug:
         var: config_check.stdout_lines
 
+    - name: Check OSPF adjacencies, NTP, SNMP and Zabbix agent
+      ansible.builtin.shell: |
+        NB=$(TERM=dumb vtysh -c 'show ip ospf neighbor' 2>/dev/null | grep -c 'Full')
+        if [ "$NB" -gt 0 ]; then
+          echo "CFG_OK: ospf neighbours=$NB"
+        else
+          echo "CFG_MISSING: ospf neighbours=0 (02_ospf.yml)"
+        fi
+
+        if chronyc tracking 2>/dev/null | grep -q 'Leap status *: *Normal'; then
+          echo "CFG_OK: ntp synced"
+        else
+          echo "CFG_MISSING: ntp not synced (03_ntp.yml)"
+        fi
+        grep -q '^server 192.168.23.10' /etc/chrony/chrony.conf 2>/dev/null \
+          && echo "CFG_OK: ntp server line" || echo "CFG_MISSING: ntp server line (03_ntp.yml)"
+
+        [ -f /etc/snmp/snmpd.conf ] && echo "CFG_OK: snmpd.conf" || echo "CFG_MISSING: snmpd.conf (04_snmp.yml)"
+        ps | grep '[s]nmpd' > /dev/null && echo "SERVICE_OK: snmpd" || echo "SERVICE_DOWN: snmpd (04_snmp.yml)"
+        TERM=dumb vtysh -c 'show run' 2>/dev/null | grep -q '^agentx' \
+          && echo "CFG_OK: frr agentx" || echo "CFG_MISSING: frr agentx (04_snmp.yml)"
+
+        ps | grep '[z]abbix_agentd' > /dev/null \
+          && echo "SERVICE_OK: zabbix-agent" || echo "SERVICE_DOWN: zabbix-agent (11_zabbix.yml)"
+      register: extended_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show extended check
+      ansible.builtin.debug:
+        var: extended_check.stdout_lines
+
     - name: Check backup exists on router
       ansible.builtin.shell: |
         if ls /tmp/backups/{{ inventory_hostname }}-frr-*.conf >/dev/null 2>&1; then
-          echo "BACKUP_OK: $(ls /tmp/backup/{{ inventory_hostname }}-frr-*.conf | wc -l) file(s)"
+          echo "BACKUP_OK: $(ls /tmp/backups/{{ inventory_hostname }}-frr-*.conf | wc -l) file(s)"
           ls -lh /tmp/backups/*.conf | awk '{print $NF, "("$5")"}'
         else
           echo "BACKUP_MISSING (06_backup.yml)"
@@ -90,7 +122,7 @@
 
     - name: Check backup exists on controller
       ansible.builtin.stat:
-        path: "./backups/{{ inventory_hostname }}"
+        path: "{{ playbook_dir }}/../backups/{{ inventory_hostname }}"
       delegate_to: localhost
       register: controller_backup_check
       failed_when: false
@@ -133,6 +165,7 @@
         missing_items: >-
           {{ (dep_check.stdout_lines +
               config_check.stdout_lines +
+              extended_check.stdout_lines +
               backup_check.stdout_lines +
               service_check.stdout_lines)
               | select('match', '.*MISSING.*|.*DOWN.*')

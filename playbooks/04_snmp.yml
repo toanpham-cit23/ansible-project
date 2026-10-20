@@ -13,6 +13,20 @@
         path: /tmp/snmp-pkgs
         state: directory
         mode: '0755'
+    - name: Check SNMP packages on control node
+      ansible.builtin.stat:
+        path: /root/ansible-project/files/snmp
+      delegate_to: localhost
+      register: snmp_pkg_dir
+      changed_when: false
+
+    - name: Stop if SNMP packages are missing
+      ansible.builtin.fail:
+        msg: >-
+          files/snmp/ not found on the control node (it is gitignored, so a fresh
+          clone does not have it). Copy the snmpd .apk packages there and run again.
+      when: not snmp_pkg_dir.stat.exists
+
     - name: Copy all SNMP package to router
       ansible.builtin.copy:
         src: "{{ item }}"
@@ -30,6 +44,27 @@
         rc-service frr start
         sleep 3
       register: frr_restart
+
+    # Without this FRR never opens the AgentX socket, so snmpd only answers
+    # with Linux system MIBs and shows nothing about OSPF or routes.
+    - name: Enable AgentX in FRR
+      ansible.builtin.shell: |
+        TERM=dumb vtysh -c 'conf t' -c 'agentx' -c 'end' -c 'wr mem'
+      register: frr_agentx
+      changed_when: "'%' not in frr_agentx.stdout"
+      failed_when: false
+
+    - name: Show AgentX output
+      ansible.builtin.debug:
+        var: frr_agentx.stdout_lines
+
+    - name: Restart FRR to open the AgentX socket
+      ansible.builtin.shell: |
+        rc-service frr restart 2>/dev/null || { rc-service frr stop; sleep 2; rc-service frr start; }
+        sleep 3
+      register: frr_agentx_restart
+      changed_when: true
+      failed_when: false
     - name: Create SNMP config file
       ansible.builtin.copy:
         content: |
@@ -63,6 +98,29 @@
     - name: Wait for snmpd to be ready
       ansible.builtin.pause:
         seconds: 3
+
+    - name: Verify AgentX socket and snmpd are both up
+      ansible.builtin.shell: |
+        TERM=dumb vtysh -c 'show run' 2>/dev/null | grep -q '^agentx' \
+          && echo "FRR_AGENTX_OK" || echo "FRR_AGENTX_MISSING"
+        ps | grep '[s]nmpd' > /dev/null && echo "SNMPD_RUNNING" || echo "SNMPD_DOWN"
+        [ -S /var/agentx/master ] && echo "AGENTX_SOCKET_OK" || echo "AGENTX_SOCKET_MISSING"
+      register: snmp_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Show verification
+      ansible.builtin.debug:
+        var: snmp_verify.stdout_lines
+
     - name: Result
       ansible.builtin.debug:
         msg: "{{ snmpd_start.stdout_lines }}"
+
+    - name: Final status
+      ansible.builtin.debug:
+        msg: >-
+          SNMP on {{ inventory_hostname }}:
+          {{ 'OK - snmpd running with FRR AgentX data'
+             if ('FRR_AGENTX_OK' in snmp_verify.stdout and 'SNMPD_RUNNING' in snmp_verify.stdout)
+             else 'PARTIAL - check the verification block above' }}

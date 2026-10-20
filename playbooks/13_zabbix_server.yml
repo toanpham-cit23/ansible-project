@@ -1,0 +1,518 @@
+---
+# 13_zabbix_server.yml - Deploy Zabbix Server + Web Frontend (dashboard) on the controller
+# Run: ansible-playbook playbooks/13_zabbix_server.yml
+#
+# Stack: zabbix-server 7.0 LTS (10051) + nginx frontend (8080) + MariaDB 10.11
+# After this playbook the dashboard is live at http://192.168.23.10:8080
+#   default login: Admin / zabbix  -> change it on first login
+#
+# Port map on the controller:
+#   8080 -> Zabbix frontend (dashboard)
+#   8081 -> phpIPAM (see 12_phpipam.yml)
+#   10051 -> Zabbix server (agents report here, see 11_zabbix.yml)
+- name: Deploy Zabbix Server with Web Dashboard
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    project_dir: /root/ansible-project
+    zabbix_dir: /root/zabbix
+    zabbix_web_port: 8080
+    zabbix_server_port: 10051
+    zabbix_tz: Asia/Ho_Chi_Minh
+    zabbix_db_name: zabbix
+    zabbix_db_user: zabbix
+    zabbix_db_pass: "{{ vault_zabbix_db_pass | default('zabbix_pwd') }}"
+    zabbix_db_root_pass: "{{ vault_zabbix_db_root_pass | default('zabbix_root_pwd') }}"
+    zabbix_url: "http://192.168.23.10:{{ zabbix_web_port }}"
+    zabbix_api_user: Admin
+    zabbix_api_pass: "{{ vault_zabbix_admin_pass | default('zabbix') }}"
+    zabbix_host_group: "FRR Routers"
+  tasks:
+    # ---------- 1. Docker prerequisites ----------
+    - name: Check docker availability
+      ansible.builtin.shell: command -v docker || echo NOT_FOUND
+      register: docker_bin
+      changed_when: false
+      failed_when: false
+
+    - name: Install docker on Alpine controller
+      ansible.builtin.shell: |
+        apk add --no-cache docker docker-cli-compose 2>&1 | tail -5
+        rc-update add docker default
+        rc-service docker start
+        sleep 5
+      register: docker_install
+      when: docker_bin.stdout | trim == 'NOT_FOUND'
+      changed_when: docker_install.rc == 0
+      failed_when: false
+
+    - name: Show docker install result
+      ansible.builtin.debug:
+        var: docker_install.stdout_lines | default(['docker already present'])
+
+    - name: Check docker daemon is running
+      ansible.builtin.shell: docker info > /dev/null 2>&1 && echo DOCKER_OK || echo DOCKER_DOWN
+      register: docker_daemon
+      changed_when: false
+      failed_when: false
+
+    - name: Start docker daemon if it is down
+      ansible.builtin.shell: |
+        rc-service docker start 2>/dev/null || service docker start 2>/dev/null || true
+        sleep 5
+        docker info > /dev/null 2>&1 && echo DOCKER_OK || echo DOCKER_DOWN
+      register: docker_start
+      when: docker_daemon.stdout | trim == 'DOCKER_DOWN'
+      changed_when: false
+      failed_when: false
+
+    - name: Stop if docker is not usable
+      ansible.builtin.fail:
+        msg: "Docker is not usable on this host. Install docker + docker-cli-compose and run again."
+      when: >-
+        (docker_daemon.stdout | trim == 'DOCKER_DOWN') and
+        (docker_start.stdout | default('DOCKER_DOWN') | trim == 'DOCKER_DOWN')
+
+    - name: Detect docker compose command
+      ansible.builtin.shell: |
+        if docker compose version > /dev/null 2>&1; then
+          echo "docker compose"
+        elif command -v docker-compose > /dev/null 2>&1; then
+          echo "docker-compose"
+        else
+          echo NONE
+        fi
+      register: compose_cmd
+      changed_when: false
+      failed_when: false
+
+    - name: Stop if docker compose is missing
+      ansible.builtin.fail:
+        msg: "docker compose / docker-compose not found. Install docker-cli-compose and run again."
+      when: compose_cmd.stdout | trim == 'NONE'
+
+    # ---------- 2. Guard against port clashes ----------
+    - name: Check which ports are already taken
+      ansible.builtin.shell: |
+        for P in {{ zabbix_web_port }} {{ zabbix_server_port }}; do
+          if netstat -tln 2>/dev/null | grep -q ":$P " || ss -tln 2>/dev/null | grep -q ":$P "; then
+            echo "$P IN_USE"
+          else
+            echo "$P FREE"
+          fi
+        done
+      register: port_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show port check
+      ansible.builtin.debug:
+        var: port_check.stdout_lines
+
+    - name: Warn if the web port is taken by another container
+      ansible.builtin.debug:
+        msg: >-
+          WARNING - port {{ zabbix_web_port }} is already in use. If phpIPAM is still on
+          {{ zabbix_web_port }}, change phpipam_port to 8081 in 12_phpipam.yml first.
+      when: ("%d IN_USE" % (zabbix_web_port | int)) in port_check.stdout
+
+    # ---------- 3. Stack definition ----------
+    - name: Create zabbix directory
+      ansible.builtin.file:
+        path: "{{ zabbix_dir }}"
+        state: directory
+        mode: '0750'
+
+    - name: Deploy docker-compose.yml
+      ansible.builtin.copy:
+        content: |
+          # Zabbix stack - managed by Ansible (13_zabbix_server.yml)
+          services:
+            zabbix-db:
+              image: mariadb:10.11
+              container_name: zabbix-db
+              restart: unless-stopped
+              command:
+                - --character-set-server=utf8mb4
+                - --collation-server=utf8mb4_bin
+              environment:
+                TZ: "{{ zabbix_tz }}"
+                MYSQL_ROOT_PASSWORD: "{{ zabbix_db_root_pass }}"
+                MYSQL_DATABASE: "{{ zabbix_db_name }}"
+                MYSQL_USER: "{{ zabbix_db_user }}"
+                MYSQL_PASSWORD: "{{ zabbix_db_pass }}"
+              volumes:
+                - zabbix-db-data:/var/lib/mysql
+
+            zabbix-server:
+              image: zabbix/zabbix-server-mysql:alpine-7.0-latest
+              container_name: zabbix-server
+              restart: unless-stopped
+              environment:
+                TZ: "{{ zabbix_tz }}"
+                DB_SERVER_HOST: zabbix-db
+                MYSQL_DATABASE: "{{ zabbix_db_name }}"
+                MYSQL_USER: "{{ zabbix_db_user }}"
+                MYSQL_PASSWORD: "{{ zabbix_db_pass }}"
+                ZBX_TIMEOUT: 10
+                ZBX_STARTPOLLERS: 10
+              ports:
+                - "{{ zabbix_server_port }}:10051"
+              depends_on:
+                - zabbix-db
+
+            zabbix-web:
+              image: zabbix/zabbix-web-nginx-mysql:alpine-7.0-latest
+              container_name: zabbix-web
+              restart: unless-stopped
+              environment:
+                TZ: "{{ zabbix_tz }}"
+                ZBX_SERVER_HOST: zabbix-server
+                ZBX_SERVER_NAME: "FRR Lab"
+                DB_SERVER_HOST: zabbix-db
+                MYSQL_DATABASE: "{{ zabbix_db_name }}"
+                MYSQL_USER: "{{ zabbix_db_user }}"
+                MYSQL_PASSWORD: "{{ zabbix_db_pass }}"
+                PHP_TZ: "{{ zabbix_tz }}"
+              ports:
+                - "{{ zabbix_web_port }}:8080"
+              depends_on:
+                - zabbix-server
+
+          volumes:
+            zabbix-db-data:
+        dest: "{{ zabbix_dir }}/docker-compose.yml"
+        mode: '0640'
+      register: compose_file
+
+    - name: Validate compose file
+      ansible.builtin.shell: "{{ compose_cmd.stdout }} config > /dev/null && echo COMPOSE_VALID || echo COMPOSE_INVALID"
+      args:
+        chdir: "{{ zabbix_dir }}"
+      register: compose_validate
+      changed_when: false
+      failed_when: false
+
+    - name: Show compose validation
+      ansible.builtin.debug:
+        var: compose_validate.stdout
+
+    # ---------- 4. Start the stack ----------
+    - name: Start Zabbix stack
+      ansible.builtin.shell: "{{ compose_cmd.stdout }} up -d 2>&1 | tail -15"
+      args:
+        chdir: "{{ zabbix_dir }}"
+      register: compose_up
+      changed_when: compose_up.rc == 0
+      failed_when: false
+
+    - name: Show stack start output
+      ansible.builtin.debug:
+        var: compose_up.stdout_lines
+
+    - name: Wait for database and schema import
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: List running containers
+      ansible.builtin.shell: docker ps --filter "name=zabbix" --format '{{ "{{" }}.Names{{ "}}" }} {{ "{{" }}.Status{{ "}}" }}'
+      register: docker_ps
+      changed_when: false
+      failed_when: false
+
+    - name: Show container status
+      ansible.builtin.debug:
+        var: docker_ps.stdout_lines
+
+    - name: Check Zabbix server started
+      ansible.builtin.shell: |
+        if docker logs zabbix-server 2>&1 | grep -q "server #0 started"; then
+          echo "SERVER_STARTED"
+        else
+          echo "SERVER_NOT_READY"
+          docker logs zabbix-server 2>&1 | tail -8
+        fi
+      register: zbx_server_log
+      changed_when: false
+      failed_when: false
+
+    - name: Show server log state
+      ansible.builtin.debug:
+        var: zbx_server_log.stdout_lines
+
+    - name: Check frontend answers over HTTP
+      ansible.builtin.uri:
+        url: "{{ zabbix_url }}/index.php"
+        method: GET
+        status_code: [200]
+        timeout: 15
+      register: zbx_http
+      retries: 20
+      delay: 5
+      until: zbx_http.status is defined and zbx_http.status == 200
+      failed_when: false
+
+    - name: Show frontend status
+      ansible.builtin.debug:
+        msg: "Frontend {{ zabbix_url }} -> HTTP {{ zbx_http.status | default('NO RESPONSE') }}"
+
+    # ---------- 5. API: host group, hosts, items ----------
+    - name: Zabbix API login
+      ansible.builtin.uri:
+        url: "{{ zabbix_url }}/api_jsonrpc.php"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: application/json-rpc
+        body:
+          jsonrpc: "2.0"
+          method: user.login
+          params:
+            username: "{{ zabbix_api_user }}"
+            password: "{{ zabbix_api_pass }}"
+          id: 1
+        status_code: [200]
+      register: zbx_login
+      until: zbx_login.json.result is defined
+      retries: 10
+      delay: 5
+      failed_when: false
+
+    - name: Set API token
+      ansible.builtin.set_fact:
+        zbx_token: "{{ zbx_login.json.result | default('') }}"
+      no_log: true
+
+    - name: Warn when the API login failed
+      ansible.builtin.debug:
+        msg: >-
+          WARNING - Zabbix API login failed ({{ zbx_login.json.error.data | default('check the frontend')
+          if zbx_login.json.error is defined else 'no response' }}).
+          The dashboard is up but hosts must be added by hand.
+      when: zbx_token | length == 0
+
+    - name: Look up the host group
+      ansible.builtin.uri:
+        url: "{{ zabbix_url }}/api_jsonrpc.php"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: application/json-rpc
+        body:
+          jsonrpc: "2.0"
+          method: hostgroup.get
+          params:
+            output: ["groupid", "name"]
+            filter:
+              name: ["{{ zabbix_host_group }}"]
+          auth: "{{ zbx_token }}"
+          id: 2
+        status_code: [200]
+      register: zbx_group_get
+      when: zbx_token | length > 0
+      failed_when: false
+
+    - name: Create the host group when missing
+      ansible.builtin.uri:
+        url: "{{ zabbix_url }}/api_jsonrpc.php"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: application/json-rpc
+        body:
+          jsonrpc: "2.0"
+          method: hostgroup.create
+          params:
+            name: "{{ zabbix_host_group }}"
+          auth: "{{ zbx_token }}"
+          id: 3
+        status_code: [200]
+      register: zbx_group_create
+      when: zbx_token | length > 0 and (zbx_group_get.json.result | default([]) | length) == 0
+      failed_when: false
+
+    - name: Resolve host group id
+      ansible.builtin.set_fact:
+        zbx_group_id: >-
+          {{ zbx_group_get.json.result[0].groupid
+             if (zbx_group_get.json.result | default([]) | length) > 0
+             else (zbx_group_create.json.result.groupids[0] | default('')) }}
+      when: zbx_token | length > 0
+
+    - name: List routers already registered
+      ansible.builtin.uri:
+        url: "{{ zabbix_url }}/api_jsonrpc.php"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: application/json-rpc
+        body:
+          jsonrpc: "2.0"
+          method: host.get
+          params:
+            output: ["hostid", "host"]
+            selectInterfaces: ["interfaceid", "ip"]
+            filter:
+              host: "{{ groups['routers'] }}"
+          auth: "{{ zbx_token }}"
+          id: 4
+        status_code: [200]
+      register: zbx_host_get
+      when: zbx_token | length > 0 and (zbx_group_id | default('') | length) > 0
+      failed_when: false
+
+    - name: Register routers that are not in Zabbix yet
+      ansible.builtin.uri:
+        url: "{{ zabbix_url }}/api_jsonrpc.php"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: application/json-rpc
+        body:
+          jsonrpc: "2.0"
+          method: host.create
+          params:
+            host: "{{ item }}"
+            groups:
+              - groupid: "{{ zbx_group_id }}"
+            interfaces:
+              - type: 1
+                main: 1
+                useip: 1
+                ip: "{{ hostvars[item]['ansible_host'] }}"
+                dns: ""
+                port: "10050"
+          auth: "{{ zbx_token }}"
+          id: 5
+        status_code: [200]
+      loop: >-
+        {{ groups['routers'] | difference(zbx_host_get.json.result | default([]) | map(attribute='host') | list) }}
+      when: zbx_token | length > 0 and (zbx_group_id | default('') | length) > 0
+      register: zbx_host_create
+      failed_when: false
+
+    - name: Show host registration result
+      ansible.builtin.debug:
+        msg: >-
+          {{ ('Registered: ' ~ (zbx_host_create.results | map(attribute='item') | list | join(', ')))
+             if (zbx_host_create.results | default([]) | length) > 0
+             else 'All routers were already registered' }}
+      when: zbx_token | length > 0
+
+    - name: Refresh the router list with interfaces
+      ansible.builtin.uri:
+        url: "{{ zabbix_url }}/api_jsonrpc.php"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: application/json-rpc
+        body:
+          jsonrpc: "2.0"
+          method: host.get
+          params:
+            output: ["hostid", "host"]
+            selectInterfaces: ["interfaceid", "ip"]
+            filter:
+              host: "{{ groups['routers'] }}"
+          auth: "{{ zbx_token }}"
+          id: 6
+        status_code: [200]
+      register: zbx_hosts_now
+      when: zbx_token | length > 0
+      failed_when: false
+
+    - name: List hosts that already have the FRR items
+      ansible.builtin.uri:
+        url: "{{ zabbix_url }}/api_jsonrpc.php"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: application/json-rpc
+        body:
+          jsonrpc: "2.0"
+          method: item.get
+          params:
+            output: ["hostid", "key_"]
+            filter:
+              key_: ["frr.ospf.neighbors", "frr.routes.total", "frr.interface.down"]
+          auth: "{{ zbx_token }}"
+          id: 7
+        status_code: [200]
+      register: zbx_item_get
+      when: zbx_token | length > 0
+      failed_when: false
+
+    - name: Remember which hosts already have items
+      ansible.builtin.set_fact:
+        zbx_item_hostids: "{{ zbx_item_get.json.result | default([]) | map(attribute='hostid') | unique | list }}"
+      when: zbx_token | length > 0
+
+    - name: Create the three FRR items on hosts without them
+      ansible.builtin.uri:
+        url: "{{ zabbix_url }}/api_jsonrpc.php"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: application/json-rpc
+        body:
+          jsonrpc: "2.0"
+          method: item.create
+          params:
+            - name: "OSPF neighbors in Full state"
+              key_: "frr.ospf.neighbors"
+              hostid: "{{ item.hostid }}"
+              interfaceid: "{{ item.interfaces[0].interfaceid }}"
+              type: 0
+              value_type: 3
+              delay: "1m"
+            - name: "Total routes in RIB"
+              key_: "frr.routes.total"
+              hostid: "{{ item.hostid }}"
+              interfaceid: "{{ item.interfaces[0].interfaceid }}"
+              type: 0
+              value_type: 3
+              delay: "1m"
+            - name: "Interfaces in down state"
+              key_: "frr.interface.down"
+              hostid: "{{ item.hostid }}"
+              interfaceid: "{{ item.interfaces[0].interfaceid }}"
+              type: 0
+              value_type: 3
+              delay: "1m"
+          auth: "{{ zbx_token }}"
+          id: 8
+        status_code: [200]
+      loop: "{{ zbx_hosts_now.json.result | default([]) }}"
+      when:
+        - zbx_token | length > 0
+        - item.hostid not in (zbx_item_hostids | default([]))
+      register: zbx_item_create
+      failed_when: false
+
+    - name: Show item creation result
+      ansible.builtin.debug:
+        msg: >-
+          {{ ('Created 3 items on: ' ~ (zbx_item_create.results | selectattr('item', 'defined') | map(attribute='item.host') | list | join(', ')))
+             if (zbx_item_create.results | default([]) | length) > 0
+             else 'Items already present on every router' }}
+      when: zbx_token | length > 0
+
+    # ---------- 6. Report ----------
+    - name: Dashboard access information
+      ansible.builtin.debug:
+        msg:
+          - "Dashboard : {{ zabbix_url }}"
+          - "Login     : {{ zabbix_api_user }} / (default password is zabbix - change it now)"
+          - "API       : {{ zbx_token | length > 0 }}"
+          - "Host group: {{ zabbix_host_group }}"
+          - "Agents    : {{ groups['routers'] | join(', ') }} -> port 10050"
+          - "phpIPAM   : http://192.168.23.10:8081 (must NOT use 8080 any more)"
+
+    - name: Final status
+      ansible.builtin.debug:
+        msg: >-
+          Zabbix stack: containers={{ docker_ps.stdout_lines | default([]) | length }}
+          | server={{ 'STARTED' if 'SERVER_STARTED' in zbx_server_log.stdout else 'NOT READY' }}
+          | frontend={{ zbx_http.status | default('NO RESPONSE') }}
+          | api={{ 'OK' if zbx_token | length > 0 else 'FAILED' }}

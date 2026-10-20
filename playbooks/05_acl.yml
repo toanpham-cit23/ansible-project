@@ -3,32 +3,59 @@
   hosts: routers
   gather_facts: no
   tasks:
-    - name: Configure standard ACL and apply it to VTY lines
+    - name: Configure standard ACL 10 (permit management subnet only)
       ansible.builtin.shell: |
-        vtysh -c 'conf t' \
-              -c 'no access-list 10' \
-              -c 'access-list 10 permit 192.168.23.0 0.0.0.255' \
-              -c 'access-list 10 deny any' \
-              -c 'end'
-              -c 'write memory'
+        TERM=dumb vtysh \
+          -c 'conf t' \
+          -c 'no access-list 10' \
+          -c 'access-list 10 permit 192.168.23.0 0.0.0.255' \
+          -c 'access-list 10 deny any' \
+          -c 'end' \
+          -c 'write memory'
       register: acl_result
-      changed_when: "'Failed' not in acl_result.stderr"
-      failed_when: "'Unknown command' in acl_result.stderr or 'Incomplete command' in acl_result.stderr"
+      changed_when: "'%' not in acl_result.stdout"
+      failed_when: "'Unknown command' in acl_result.stdout or 'Incomplete command' in acl_result.stdout"
 
-    - name: Result
+    - name: Show ACL creation output
       ansible.builtin.debug:
         var: acl_result.stdout_lines
 
-    - name: Verify ACL exists in running configuration
+    # NOTE: access-class on line vty can lock you out of SSH if the ACL is wrong.
+    # ACL 10 only permits 192.168.23.0/24, so keep the controller (192.168.23.10)
+    # inside that range before enabling this task.
+    - name: Apply ACL 10 to VTY lines
       ansible.builtin.shell: |
-        TERM=dumb vtysh -c 'show run' 2>&1 | grep 'access-list 10' && echo "ACL_OK" || echo "ACL_NOT_FOUND"
+        TERM=dumb vtysh \
+          -c 'conf t' \
+          -c 'line vty' \
+          -c 'access-class 10 in' \
+          -c 'end' \
+          -c 'write memory'
+      register: acl_apply
+      changed_when: "'%' not in acl_apply.stdout"
+      failed_when: false
+
+    - name: Show ACL apply output
+      ansible.builtin.debug:
+        var: acl_apply.stdout_lines
+
+    - name: Verify ACL and VTY binding in running configuration
+      ansible.builtin.shell: |
+        RUN=$(TERM=dumb vtysh -c 'show run' 2>&1)
+        echo "$RUN" | grep -q 'access-list 10 permit 192.168.23.0' && echo "ACL_OK" || echo "ACL_NOT_FOUND"
+        echo "$RUN" | grep -q 'access-class 10 in' && echo "VTY_BIND_OK" || echo "VTY_BIND_MISSING"
       register: acl_verify
       changed_when: false
+      failed_when: false
 
     - name: Show ACL verification
       ansible.builtin.debug:
-       var: acl_verify.stdout_lines
+        var: acl_verify.stdout_lines
 
     - name: Final status
       ansible.builtin.debug:
-        msg: "ACL configuration completed on {{ inventory_hostname }}: SUCCESS"
+        msg: >-
+          ACL configuration on {{ inventory_hostname }}:
+          {{ 'SUCCESS - ACL 10 created and bound to VTY'
+             if ('VTY_BIND_OK' in acl_verify.stdout)
+             else 'WARNING - ACL created but VTY binding missing, check access-class support' }}

@@ -1,0 +1,97 @@
+---
+# 14_restore.yml - Restore FRR configuration from a backup taken by 06_backup.yml
+#
+# DESTRUCTIVE: it overwrites the running configuration, so it requires confirmation.
+#
+#   ansible-playbook playbooks/14_restore.yml -e confirm_restore=yes
+#   ansible-playbook playbooks/14_restore.yml -e confirm_restore=yes \
+#       -e restore_file=/root/ansible-project/backups/r1/r1-frr-20261020-101500.conf
+#
+# Without restore_file the newest backup of each router is used.
+# The pre-restore config is kept on the router at /tmp/pre_restore_<host>.conf
+- name: Restore FRR configuration from backup
+  hosts: routers
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    backup_root: "{{ playbook_dir }}/../backups"
+    restore_file: ""
+  tasks:
+    - name: Require explicit confirmation
+      ansible.builtin.fail:
+        msg: >-
+          Refusing to restore without confirmation.
+          Re-run with: ansible-playbook playbooks/14_restore.yml -e confirm_restore=yes
+      when: (confirm_restore | default('no')) != 'yes'
+
+    - name: Find available backups on the controller
+      ansible.builtin.find:
+        paths: "{{ backup_root }}/{{ inventory_hostname }}"
+        patterns: "*.conf"
+        file_type: file
+      delegate_to: localhost
+      register: backup_list
+      failed_when: false
+
+    - name: Stop when no backup exists for this router
+      ansible.builtin.fail:
+        msg: "No backup in {{ backup_root }}/{{ inventory_hostname }} - run 06_backup.yml first."
+      when: (backup_list.files | default([]) | length) == 0
+
+    - name: Pick the backup to restore
+      ansible.builtin.set_fact:
+        chosen_backup: >-
+          {{ restore_file if (restore_file | length) > 0
+             else (backup_list.files | sort(attribute='mtime') | last).path }}
+
+    - name: Show the chosen backup
+      ansible.builtin.debug:
+        msg: "Restoring {{ inventory_hostname }} from {{ chosen_backup }}"
+
+    - name: Save the current config as a safety net
+      ansible.builtin.shell: |
+        TERM=dumb vtysh -c 'show run' > /tmp/pre_restore_{{ inventory_hostname }}.conf 2>&1 || true
+        echo "saved $(wc -l < /tmp/pre_restore_{{ inventory_hostname }}.conf) lines"
+      register: safety_net
+      changed_when: false
+      failed_when: false
+
+    - name: Copy the backup to the router
+      ansible.builtin.copy:
+        src: "{{ chosen_backup }}"
+        dest: "/tmp/restore_{{ inventory_hostname }}.conf"
+        mode: '0600'
+
+    - name: Apply the configuration with vtysh
+      ansible.builtin.shell: |
+        TERM=dumb vtysh -f /tmp/restore_{{ inventory_hostname }}.conf 2>&1 | tail -20
+        TERM=dumb vtysh -c 'write memory'
+      register: restore_result
+      changed_when: true
+      failed_when: false
+
+    - name: Show apply output
+      ansible.builtin.debug:
+        var: restore_result.stdout_lines
+
+    - name: Verify the restored configuration
+      ansible.builtin.shell: |
+        RUN=$(TERM=dumb vtysh -c 'show run' 2>&1)
+        echo "$RUN" | grep -q "hostname {{ inventory_hostname }}" && echo "RESTORE_OK: hostname" || echo "RESTORE_FAIL: hostname"
+        echo "$RUN" | grep -q "router ospf" && echo "RESTORE_OK: ospf" || echo "RESTORE_FAIL: ospf"
+        echo "$RUN" | grep -q "interface lo" && echo "RESTORE_OK: loopback" || echo "RESTORE_FAIL: loopback"
+      register: restore_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Show verification
+      ansible.builtin.debug:
+        var: restore_verify.stdout_lines
+
+    - name: Final status
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'RESTORE SUCCESS on ' ~ inventory_hostname ~ ' from ' ~ chosen_backup
+             if 'RESTORE_FAIL' not in restore_verify.stdout
+             else 'RESTORE FAILED on ' ~ inventory_hostname ~
+                  ' - previous config is at /tmp/pre_restore_' ~ inventory_hostname ~ '.conf' }}

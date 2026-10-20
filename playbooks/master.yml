@@ -1,10 +1,25 @@
 ---
-- import_playbook: 01_fix_frr.yml
+# Main deployment pipeline - run with:
+#   ansible-playbook playbooks/master.yml
+#
+# One-off / operational playbooks are NOT imported here on purpose:
+#   08_vault.yml      -> run once to encrypt token.yml (needs .vault_pass)
+#   09_git_github.yml -> run after 08_vault to push the repo
+#                        (it loads token.yml, so a fresh clone fails without it)
+#   10_cron.yml       -> run once to schedule the automatic backup job
+#   14_restore.yml    -> destructive, needs -e confirm_restore=yes
+#
+# Correct first-time order:
+#   master.yml -> 08_vault.yml -> 09_git_github.yml -> 10_cron.yml
+- import_playbook: 00_precheck.yml
 - import_playbook: 00_hostname.yml
+- import_playbook: 01_fix_frr.yml
 - import_playbook: 02_ospf.yml
 - import_playbook: 03_ntp.yml
 - import_playbook: 04_snmp.yml
 - import_playbook: 05_acl.yml
 - import_playbook: 06_backup.yml
 - import_playbook: 07_check.yml
-- import_playbook: 09_git_github.yml
+- import_playbook: 13_zabbix_server.yml
+- import_playbook: 11_zabbix.yml
+- import_playbook: 12_phpipam.yml

@@ -1,0 +1,66 @@
+---
+# 00_precheck.yml - Fail fast when a router is not reachable
+# Run: ansible-playbook playbooks/00_precheck.yml
+# Runs first in master.yml so a dead router is reported clearly instead of
+# blowing up somewhere in the middle of a deployment.
+- name: Pre-flight checks before deployment
+  hosts: routers
+  gather_facts: no
+  tasks:
+    - name: Check ICMP reachability from the controller
+      ansible.builtin.shell: |
+        ping -c 2 -W 2 {{ ansible_host }} > /dev/null 2>&1 && echo PING_OK || echo PING_FAIL
+      delegate_to: localhost
+      register: ping_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check SSH port 22 is open
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 5
+      delegate_to: localhost
+      register: ssh_check
+      ignore_errors: true
+
+    - name: Check python3 on the router
+      ansible.builtin.raw: python3 --version 2>&1 || echo PYTHON_MISSING
+      register: py_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check vtysh on the router
+      ansible.builtin.raw: command -v vtysh || echo VTYSH_MISSING
+      register: vtysh_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check free space in /tmp
+      ansible.builtin.raw: df -m /tmp | tail -1 | awk '{print $4}'
+      register: disk_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show pre-flight summary
+      ansible.builtin.debug:
+        msg:
+          - "{{ inventory_hostname }} ({{ ansible_host }})"
+          - "ICMP      : {{ ping_check.stdout | trim }}"
+          - "SSH/22    : {{ 'SSH_OK' if not (ssh_check.failed | default(false)) else 'SSH_FAIL' }}"
+          - "python3   : {{ py_check.stdout | trim }}"
+          - "vtysh     : {{ vtysh_check.stdout | trim }}"
+          - "free /tmp : {{ disk_check.stdout | trim }} MB"
+
+    - name: Fail when the router is not ready
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is not ready:
+          {{ 'no ICMP reply' if ping_check.stdout | trim == 'PING_FAIL' else '' }}
+          {{ 'SSH port 22 closed' if (ssh_check.failed | default(false)) else '' }}
+          {{ 'vtysh missing (FRR not installed)' if 'VTYSH_MISSING' in vtysh_check.stdout else '' }}
+          - fix connectivity before running the deployment.
+      when: >-
+        (ping_check.stdout | trim == 'PING_FAIL') or
+        (ssh_check.failed | default(false)) or
+        ('VTYSH_MISSING' in vtysh_check.stdout)

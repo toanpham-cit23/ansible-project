@@ -1,0 +1,257 @@
+---
+# 11_zabbix.yml - Install and configure Zabbix Agent on FRR routers
+# Run: ansible-playbook playbooks/11_zabbix.yml
+#
+# Package layout (optional, offline install):
+#   files/zabbix/*.apk        -> zabbix-agent + dependencies
+# If the local folder is missing, the playbook falls back to the online repo.
+- name: Zabbix Agent Deployment for Routers
+  hosts: routers
+  gather_facts: no
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    zabbix_server: 192.168.23.10
+    zabbix_server_active: 192.168.23.10
+    zabbix_agent_port: 10050
+    zabbix_hostname: "{{ inventory_hostname }}"
+    zabbix_pkg_dir: /tmp/zabbix-pkgs
+    zabbix_conf_dir: /etc/zabbix
+    zabbix_conf: /etc/zabbix/zabbix_agentd.conf
+    zabbix_log_dir: /var/log/zabbix
+    zabbix_run_dir: /run/zabbix
+  tasks:
+    - name: Clean old package directory
+      ansible.builtin.file:
+        path: "{{ zabbix_pkg_dir }}"
+        state: absent
+
+    - name: Create package directory
+      ansible.builtin.file:
+        path: "{{ zabbix_pkg_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check local zabbix packages on control node
+      ansible.builtin.stat:
+        path: /root/ansible-project/files/zabbix
+      delegate_to: localhost
+      register: zbx_pkg_stat
+      changed_when: false
+
+    - name: Copy zabbix packages to router
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ zabbix_pkg_dir }}/"
+        mode: '0644'
+      with_fileglob:
+        - /root/ansible-project/files/zabbix/*.apk
+      when: zbx_pkg_stat.stat.exists
+
+    - name: Install zabbix-agent from local packages
+      ansible.builtin.shell: apk add --allow-untrusted --no-network {{ zabbix_pkg_dir }}/*.apk
+      register: zbx_install_local
+      when: zbx_pkg_stat.stat.exists
+      failed_when: false
+
+    - name: Fallback - install zabbix-agent from online repository
+      ansible.builtin.shell: apk add --no-cache zabbix-agent 2>&1 | tail -5
+      register: zbx_install_online
+      when: (not zbx_pkg_stat.stat.exists) or (zbx_install_local.rc | default(1) != 0)
+      failed_when: false
+
+    - name: Show install result
+      ansible.builtin.debug:
+        msg:
+          - "local install rc : {{ zbx_install_local.rc | default('skipped') }}"
+          - "online install rc: {{ zbx_install_online.rc | default('skipped') }}"
+
+    - name: Locate zabbix_agentd binary
+      ansible.builtin.shell: |
+        if command -v zabbix_agentd > /dev/null 2>&1; then
+          command -v zabbix_agentd
+        elif [ -x /usr/sbin/zabbix_agentd ]; then
+          echo /usr/sbin/zabbix_agentd
+        else
+          echo NOT_FOUND
+        fi
+      register: zbx_bin
+      changed_when: false
+      failed_when: false
+
+    - name: Stop if the agent is not installed
+      ansible.builtin.fail:
+        msg: >-
+          zabbix_agentd NOT FOUND on {{ inventory_hostname }}.
+          Put the .apk files into files/zabbix/ on the control node,
+          or make sure the router can reach the Alpine repository.
+      when: zbx_bin.stdout | trim == 'NOT_FOUND'
+
+    - name: Show agent binary
+      ansible.builtin.debug:
+        var: zbx_bin.stdout
+
+    - name: Ensure config / log / run directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ zabbix_conf_dir }}"
+        - "{{ zabbix_conf_dir }}/zabbix_agentd.d"
+        - "{{ zabbix_log_dir }}"
+        - "{{ zabbix_run_dir }}"
+
+    - name: Deploy zabbix_agentd.conf
+      ansible.builtin.copy:
+        content: |
+          # Zabbix Agent configuration - managed by Ansible (11_zabbix.yml)
+          PidFile=/run/zabbix/zabbix_agentd.pid
+          LogFile=/var/log/zabbix/zabbix_agentd.log
+          LogFileSize=1
+          DebugLevel=3
+          Server={{ zabbix_server }}
+          ServerActive={{ zabbix_server_active }}
+          Hostname={{ zabbix_hostname }}
+          HostMetadata=FRR-Alpine
+          StartAgents=3
+          Timeout=10
+          AllowRoot=0
+          Include=/etc/zabbix/zabbix_agentd.d/*.conf
+        dest: "{{ zabbix_conf }}"
+        mode: '0644'
+      register: zbx_conf
+
+    - name: Deploy FRR monitoring keys
+      ansible.builtin.copy:
+        content: |
+          # FRR / OSPF monitoring keys - managed by Ansible (11_zabbix.yml)
+          UserParameter=frr.zebra.running,ps | grep -c '[z]ebra'
+          UserParameter=frr.ospfd.running,ps | grep -c '[o]spfd'
+          UserParameter=frr.ospf.neighbors,vtysh -c 'show ip ospf neighbor' 2>/dev/null | grep -c 'Full'
+          UserParameter=frr.ospf.routes,vtysh -c 'show ip ospf route' 2>/dev/null | grep -c 'O>'
+          UserParameter=frr.routes.total,vtysh -c 'show ip route summary' 2>/dev/null | awk '/Total/ {print $2; exit}'
+          UserParameter=frr.interface.down,vtysh -c 'show interface brief' 2>/dev/null | awk 'NR>1 && $2!="up" {c++} END {print c+0}'
+          UserParameter=frr.config.saved,test -s /etc/frr/frr.conf && echo 1 || echo 0
+          UserParameter=frr.loopback,vtysh -c 'show run' 2>/dev/null | grep -c 'interface lo'
+        dest: "{{ zabbix_conf_dir }}/zabbix_agentd.d/frr.conf"
+        mode: '0644'
+      register: zbx_frr_conf
+
+    - name: Check zabbix system user
+      ansible.builtin.shell: |
+        if grep -q '^zabbix:' /etc/passwd; then echo ZABBIX_USER_OK; else echo ZABBIX_USER_MISSING; fi
+        if grep -q '^frrvty:' /etc/group; then echo FRRVTY_GROUP_OK; else echo FRRVTY_GROUP_MISSING; fi
+      register: zbx_user_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show zabbix user check
+      ansible.builtin.debug:
+        var: zbx_user_check.stdout_lines
+
+    - name: Allow zabbix user to read FRR config (frrvty group)
+      ansible.builtin.shell: |
+        if grep -q '^frrvty:' /etc/group && ! id -nG zabbix 2>/dev/null | grep -qw frrvty; then
+          adduser zabbix frrvty && echo "ADDED_TO_FRRVTY"
+        else
+          echo "NOTHING_TO_DO"
+        fi
+      register: zbx_group
+      when: "'ZABBIX_USER_OK' in zbx_user_check.stdout"
+      changed_when: "'ADDED_TO_FRRVTY' in zbx_group.stdout"
+      failed_when: false
+
+    - name: Fix ownership of zabbix log and run directories
+      ansible.builtin.shell: |
+        if id zabbix > /dev/null 2>&1; then
+          chown -R zabbix:zabbix {{ zabbix_log_dir }} {{ zabbix_run_dir }} {{ zabbix_conf_dir }}
+          echo "OWNERSHIP_FIXED"
+        else
+          echo "ZABBIX_USER_MISSING - skipped"
+        fi
+      register: zbx_owner
+      changed_when: "'OWNERSHIP_FIXED' in zbx_owner.stdout"
+      failed_when: false
+
+    - name: Enable and restart zabbix-agent service
+      ansible.builtin.shell: |
+        SVC=""
+        for S in zabbix-agent zabbix_agentd zabbix-agentd; do
+          if [ -x /etc/init.d/$S ]; then SVC=$S; break; fi
+        done
+        if [ -z "$SVC" ]; then
+          echo "NO_INIT_SCRIPT"
+          ls /etc/init.d/ | grep -i zabbix || true
+          exit 0
+        fi
+        rc-update add "$SVC" default 2>/dev/null || true
+        rc-service "$SVC" restart 2>/dev/null || rc-service "$SVC" start
+        sleep 3
+        rc-service "$SVC" status 2>&1 | head -3
+        echo "SERVICE_NAME=$SVC"
+      register: zbx_service
+      changed_when: "'NO_INIT_SCRIPT' not in zbx_service.stdout"
+      failed_when: false
+
+    - name: Show service result
+      ansible.builtin.debug:
+        var: zbx_service.stdout_lines
+
+    - name: Wait for the agent to come up
+      ansible.builtin.pause:
+        seconds: 3
+      when: "'NO_INIT_SCRIPT' not in zbx_service.stdout"
+
+    - name: Verify agent is listening on {{ zabbix_agent_port }}
+      ansible.builtin.shell: |
+        if netstat -tlnp 2>/dev/null | grep -q ':{{ zabbix_agent_port }} '; then
+          echo "PORT_LISTENING"
+        elif ss -tlnp 2>/dev/null | grep -q ':{{ zabbix_agent_port }} '; then
+          echo "PORT_LISTENING"
+        else
+          echo "PORT_NOT_LISTENING"
+        fi
+      register: zbx_port
+      changed_when: false
+      failed_when: false
+
+    - name: Show port status
+      ansible.builtin.debug:
+        var: zbx_port.stdout
+
+    - name: Test agent keys locally
+      ansible.builtin.shell: |
+        zabbix_agentd -t system.hostname 2>&1 | head -2
+        zabbix_agentd -t frr.ospf.neighbors 2>&1 | head -2
+        zabbix_agentd -t frr.routes.total 2>&1 | head -2
+      register: zbx_test
+      changed_when: false
+      failed_when: false
+
+    - name: Show agent key test
+      ansible.builtin.debug:
+        var: zbx_test.stdout_lines
+
+    - name: Test connectivity to Zabbix server port
+      ansible.builtin.shell: |
+        if nc -z -w 3 {{ zabbix_server }} 10051 2>/dev/null; then
+          echo "SERVER_REACHABLE"
+        else
+          echo "SERVER_UNREACHABLE (check firewall / server)"
+        fi
+      register: zbx_server_check
+      changed_when: false
+      failed_when: false
+
+    - name: Show server reachability
+      ansible.builtin.debug:
+        var: zbx_server_check.stdout
+
+    - name: Final status
+      ansible.builtin.debug:
+        msg: >-
+          Zabbix agent on {{ inventory_hostname }}:
+          binary={{ zbx_bin.stdout | trim }}
+          | port={{ zbx_port.stdout | trim }}
+          | server={{ zabbix_server }}
+          | config_changed={{ zbx_conf.changed or zbx_frr_conf.changed }}

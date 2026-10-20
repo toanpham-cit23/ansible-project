@@ -38,6 +38,17 @@
       register: crond_boot
       changed_when: "'already installed' not in crond_boot.stdout"
 
+    - name: Verify the backup playbook exists
+      ansible.builtin.stat:
+        path: "{{ project_dir }}/playbooks/06_backup.yml"
+      register: backup_pb
+      failed_when: false
+
+    - name: Stop if the backup playbook is missing
+      ansible.builtin.fail:
+        msg: "{{ project_dir }}/playbooks/06_backup.yml not found - cron would fail silently"
+      when: not backup_pb.stat.exists
+
     - name: Create the backup runner script
       ansible.builtin.copy:
         dest: "{{ project_dir }}/run_backup.sh"
@@ -54,7 +65,7 @@
 
           echo "=== $(date) ===" >> "$LOG"
           cd {{ project_dir }}
-          {{ ap_path.stdout | trim }} playbooks/06_backups.yml >> "$LOG" 2>&1
+          {{ ap_path.stdout | trim }} playbooks/06_backup.yml >> "$LOG" 2>&1
 
     - name: Add the cron job to crontab
       ansible.builtin.blockinfile:
