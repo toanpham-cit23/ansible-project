@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="display:none">
+  <symbol id="i-dashboard" viewBox="0 0 24 24">
+    <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3.2" y="3.2" width="7.2" height="7.2" rx="1.6"/>
+      <rect x="13.6" y="3.2" width="7.2" height="7.2" rx="1.6"/>
+      <rect x="3.2" y="13.6" width="7.2" height="7.2" rx="1.6"/>
+      <rect x="13.6" y="13.6" width="7.2" height="7.2" rx="1.6"/>
+    </g>
+  </symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24">
+    <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="4.6" r="2.4"/>
+      <circle cx="4.8" cy="18.4" r="2.4"/>
+      <circle cx="19.2" cy="18.4" r="2.4"/>
+      <path d="M10.6 6.8 6.3 16.1M13.4 6.8l4.3 9.3M7.2 18.4h9.6"/>
+    </g>
+  </symbol>
+  <symbol id="i-db" viewBox="0 0 24 24">
+    <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <ellipse cx="12" cy="5.6" rx="7.4" ry="2.7"/>
+      <path d="M4.6 5.6v12.8c0 1.5 3.3 2.7 7.4 2.7s7.4-1.2 7.4-2.7V5.6"/>
+      <path d="M4.6 12c0 1.5 3.3 2.7 7.4 2.7s7.4-1.2 7.4-2.7"/>
+    </g>
+  </symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24">
+    <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.6 7.2h9.1M17.6 7.2h2.8M3.6 16.8h4.2M12.7 16.8h7.7"/>
+      <circle cx="15.2" cy="7.2" r="2.4"/>
+      <circle cx="10.3" cy="16.8" r="2.4"/>
+    </g>
+  </symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24">
+    <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3.2v8.6"/>
+      <path d="M6.9 6.6a7.6 7.6 0 1 0 10.2 0"/>
+    </g>
+  </symbol>
+  <symbol id="i-logo" viewBox="0 0 24 24">
+    <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3.2" y="3.2" width="17.6" height="17.6" rx="4"/>
+      <path d="M8 15.5V8.5M8 8.5h3.2a2.2 2.2 0 0 1 0 4.4H8M13.6 12.9l3 2.6"/>
+    </g>
+  </symbol>
+  <symbol id="i-logs" viewBox="0 0 24 24">
+    <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="4.2" y="3.2" width="15.6" height="17.6" rx="2.2"/>
+      <path d="M8 8h8M8 12h8M8 16h5"/>
+    </g>
+  </symbol>
+  <symbol id="i-funnel" viewBox="0 0 24 24">
+    <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.6 5.4h16.8l-6.6 7.6v6.2l-3.6 1.8v-8z"/>
+    </g>
+  </symbol>
+</svg>

@@ -1,0 +1,52 @@
+name: lab
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api-go/Dockerfile
+    image: lab/api:1.0
+    container_name: lab-api
+    restart: unless-stopped
+    environment:
+      NETDB: /data/net.db
+      NETDB_KEY: ${NETDB_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      COOKIE_SECURE: "false"
+      STATIC_DIR: /app/static
+      GOGC: "40"
+      GOMEMLIMIT: 40MiB
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    volumes:
+      - ./db:/data
+    ports: ["8080:8000"]
+    mem_limit: 80m
+    cpus: 0.50
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  poller:
+    build: ./docker/poller
+    image: lab/poller:1.0
+    container_name: lab-poller
+    restart: unless-stopped
+    network_mode: host
+    user: "10001:10001"
+    environment:
+      NETDB: /data/net.db
+      NETDB_KEY: ${NETDB_KEY:-}
+      POLL_INTERVAL: "60"
+      ALERT_WEBHOOK: ${ALERT_WEBHOOK:-}
+    volumes:
+      - ./db:/data
+    mem_limit: 48m
+    cpus: 0.25
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp"]

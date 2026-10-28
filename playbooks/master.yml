@@ -11,6 +11,9 @@
 #
 # Correct first-time order:
 #   master.yml -> 08_vault.yml -> 09_git_github.yml -> 10_cron.yml
+#
+# Zabbix and phpIPAM were removed from the pipeline on 2026-10-28: the monitoring
+# platform they deployed has been replaced by the dashboard (15_dashboard.yml).
 - import_playbook: 00_precheck.yml
 - import_playbook: 00_hostname.yml
 - import_playbook: 01_fix_frr.yml
@@ -20,6 +23,4 @@
 - import_playbook: 05_acl.yml
 - import_playbook: 06_backup.yml
 - import_playbook: 07_check.yml
-- import_playbook: 13_zabbix_server.yml
-- import_playbook: 11_zabbix.yml
-- import_playbook: 12_phpipam.yml
+- import_playbook: 15_dashboard.yml

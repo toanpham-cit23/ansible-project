@@ -182,7 +182,7 @@
         if [ -z "$SVC" ]; then
           echo "NO_INIT_SCRIPT"
           ls /etc/init.d/ | grep -i zabbix || true
-          exit 0
+          exit 1
         fi
         rc-update add "$SVC" default 2>/dev/null || true
         rc-service "$SVC" restart 2>/dev/null || rc-service "$SVC" start
@@ -191,7 +191,7 @@
         echo "SERVICE_NAME=$SVC"
       register: zbx_service
       changed_when: "'NO_INIT_SCRIPT' not in zbx_service.stdout"
-      failed_when: false
+      failed_when: zbx_service.rc != 0
 
     - name: Show service result
       ansible.builtin.debug:

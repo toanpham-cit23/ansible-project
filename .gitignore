@@ -1,8 +1,32 @@
+# --- secrets: never commit ---
+.env
+*.env
+token.yml
+.vault_pass
+**/id_rsa*
+**/*.pem
+*.conf
+
+# --- runtime data: local state, not source ---
+db/*.db
+db/*.db-wal
+db/*.db-shm
+**/net.db*
+
+# --- ansible artefacts ---
 backups/
 **/backups/
-*.conf
 *.retry
-token.yml
-files/
 devnull
-.vault_pass
+*.pre-*
+*.bak
+
+# --- vendor payloads that may carry credentials; the dashboard is source ---
+files/*
+!files/dashboard/
+
+# --- runtime noise ---
+__pycache__/
+*.pyc
+dashboard.tar.gz
+dash-ansible.tar.gz

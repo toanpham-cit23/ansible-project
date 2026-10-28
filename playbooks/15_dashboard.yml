@@ -1,0 +1,76 @@
+---
+# Monitoring dashboard - deployed onto the controller itself.
+#
+# The dashboard replaced Zabbix and phpIPAM (removed from master.yml on
+# 2026-10-28). It runs as two containers on the control node:
+#   lab-api     - Go service, REST API + static frontend  (:8080)
+#   lab-poller  - Python SNMP collector, writes SQLite
+#
+# Idempotent by design:
+#   * the tree under files/dashboard contains no database and no .env, so a
+#     re-run can never overwrite collected history or rotate the encryption keys
+#   * .env is only generated when absent, because NETDB_KEY decrypts the stored
+#     device credentials - rotating it would strand them
+- name: Dashboard - monitoring platform on the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    dash_dir: /root/lab
+    dash_src: "{{ playbook_dir }}/../files/dashboard"
+    dash_port: 8080
+    # Override with -e dash_admin_password=... ; a random one is generated on first deploy.
+
+  tasks:
+    - name: Ensure the dashboard directory exists
+      ansible.builtin.file:
+        path: "{{ dash_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check for an existing environment file
+      ansible.builtin.stat:
+        path: "{{ dash_dir }}/.env"
+      register: dash_env
+
+    - name: Generate the environment file on first deploy only
+      ansible.builtin.copy:
+        dest: "{{ dash_dir }}/.env"
+        mode: "0600"
+        content: |
+          JWT_SECRET={{ lookup('password', '/dev/null length=48 chars=ascii_letters,digits') }}
+          NETDB_KEY={{ lookup('password', '/dev/null length=64 chars=hexdigits') }}
+          ADMIN_USER=admin
+          ADMIN_PASSWORD={{ dash_admin_password | default(lookup('password', '/dev/null length=16 chars=ascii_letters,digits')) }}
+      when: not dash_env.stat.exists
+
+    - name: Copy the dashboard tree
+      ansible.builtin.copy:
+        src: "{{ dash_src }}/"
+        dest: "{{ dash_dir }}/"
+        mode: preserve
+
+    - name: Build and start the stack
+      ansible.builtin.command: docker compose up -d --build
+      args:
+        chdir: "{{ dash_dir }}"
+      register: dash_up
+      changed_when: "'Started' in dash_up.stderr or 'Created' in dash_up.stderr or 'Recreated' in dash_up.stderr"
+
+    - name: Wait for the API to answer
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ dash_port }}/healthz"
+        status_code: 200
+      register: dash_health
+      until: dash_health.status == 200
+      retries: 20
+      delay: 3
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          dashboard healthy on port {{ dash_port }} -
+          {{ (dash_up.stderr | default('') | regex_findall('(Started|Recreated|Created) [a-z-]+')) | join(', ')
+             if dash_up.stderr is defined else 'no container changes' }}
