@@ -1,0 +1,70 @@
+---
+# NOTE: designed but NOT yet imported into master.yml.
+# Requires packages that are absent from the lab routers (see each task's
+# precondition), so importing it would fail the whole chain.
+# Originally 04_nat.yml in the v2 playbook set, which numbered VLAN/NAT/DHCP as
+# 03/04/05 - renumbered here to avoid clashing with 03_ntp / 04_snmp / 05_acl.
+# 04_nat.yml - PAT/SNAT with nftables
+#
+# FRR does not do NAT; this is a kernel nftables concern. Rules are generated
+# from the subnets table, written once, and reloaded atomically with nft -f.
+- name: NAT / PAT
+  hosts: network_devices
+  gather_facts: no
+  vars:
+    wan_iface: "{{ wan_interface | default('eth0') }}"
+    lan_cidrs: "{{ lan_networks | default(['192.168.23.0/24']) }}"
+
+  tasks:
+    - name: Require nftables
+      ansible.builtin.shell: command -v nft
+      changed_when: false
+      register: nft_bin
+      failed_when: nft_bin.rc != 0
+
+    - name: Write the NAT table
+      ansible.builtin.copy:
+        dest: /etc/nftables.d/10-nat.nft
+        mode: '0644'
+        content: |
+          table inet nat {
+            chain postrouting {
+              type nat hook postrouting priority srcnat; policy accept;
+              {% for c in lan_cidrs %}
+              ip saddr {{ c }} oifname "{{ wan_iface }}" masquerade
+              {% endfor %}
+            }
+          }
+      register: nat_conf
+
+    - name: Load the ruleset
+      ansible.builtin.shell: |
+        set -e
+        nft -f /etc/nftables.d/10-nat.nft
+        nft list ruleset | grep -q masquerade && echo NAT_OK || { echo NAT_FAIL; exit 1; }
+      args:
+        executable: /bin/sh
+      when: nat_conf.changed
+      register: nat_load
+      changed_when: true
+
+    - name: Persist the ruleset across reboot
+      ansible.builtin.copy:
+        dest: /etc/local.d/nat.start
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          nft -f /etc/nftables.d/10-nat.nft
+
+    - name: Enable the local service
+      ansible.builtin.shell: rc-update add local default 2>/dev/null || true
+      changed_when: false
+
+    - name: Verify
+      ansible.builtin.shell: nft list chain inet nat postrouting
+      changed_when: false
+      register: nat_verify
+
+    - name: Report
+      ansible.builtin.debug:
+        var: nat_verify.stdout_lines

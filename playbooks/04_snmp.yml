@@ -25,7 +25,7 @@
         msg: >-
           files/snmp/ not found on the control node (it is gitignored, so a fresh
           clone does not have it). Copy the snmpd .apk packages there and run again.
-      when: not snmp_pkg_dir.stat.exists
+      when: (not snmp_pkg_dir.stat.exists) or (lookup('fileglob', '/root/ansible-project/files/snmp/*.apk', wantlist=True) | length == 0)
 
     - name: Copy all SNMP package to router
       ansible.builtin.copy:
@@ -70,7 +70,7 @@
         content: |
           # SNMP Configuration
           rocommunity public 192.168.23.0/24
-          syslocation "Data Center"
+          syslocation Data Center
           syscontact admin@company.local
           agentaddress udp:161
           master agentx

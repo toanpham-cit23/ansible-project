@@ -1,0 +1,64 @@
+---
+# NOTE: designed but NOT yet imported into master.yml.
+# Requires packages that are absent from the lab routers (see each task's
+# precondition), so importing it would fail the whole chain.
+# Originally 05_dhcp.yml in the v2 playbook set, which numbered VLAN/NAT/DHCP as
+# 03/04/05 - renumbered here to avoid clashing with 03_ntp / 04_snmp / 05_acl.
+# 05_dhcp.yml - dnsmasq scopes generated from the subnets table
+#
+# One config file per subnet, so adding a scope is an INSERT, not an edit.
+- name: DHCP scopes
+  hosts: network_devices
+  gather_facts: no
+  vars:
+    dhcp_scopes: "{{ scopes | default([]) }}"
+
+  tasks:
+    - name: Require dnsmasq
+      ansible.builtin.shell: command -v dnsmasq
+      changed_when: false
+      register: dnsmasq_bin
+      failed_when: dnsmasq_bin.rc != 0
+
+    - name: Render scopes
+      ansible.builtin.copy:
+        dest: /etc/dnsmasq.d/lab.conf
+        mode: '0644'
+        content: |
+          # managed by 05_dhcp.yml
+          port=0
+          interface={{ dhcp_iface | default('eth1') }}
+          bind-dynamic
+          {% for s in dhcp_scopes %}
+          # {{ s.cidr }} {{ s.description | default('') }}
+          dhcp-range={{ s.range_start }},{{ s.range_end }},{{ s.netmask }},{{ s.lease | default('12h') }}
+          dhcp-option=tag:{{ s.vlan_id | default(0) }},3,{{ s.gateway }}
+          dhcp-option=option:dns-server,{{ s.dns | default(s.gateway) }}
+          {% endfor %}
+      register: dhcp_conf
+
+    - name: Enable and start dnsmasq
+      ansible.builtin.shell: |
+        set -e
+        rc-update add dnsmasq default 2>/dev/null || true
+        {% if dhcp_conf.changed %}rc-service dnsmasq restart{% else %}rc-service dnsmasq start{% endif %} 2>/dev/null || rc-service dnsmasq start
+        sleep 1
+        rc-service dnsmasq status >/dev/null 2>&1 && echo DHCP_OK || { echo DHCP_FAIL; exit 1; }
+      args:
+        executable: /bin/sh
+      register: dhcp_svc
+      changed_when: dhcp_conf.changed
+
+    - name: Confirm the listener
+      ansible.builtin.shell: |
+        (netstat -lun 2>/dev/null || ss -lun) | grep -q ':67 ' && echo LISTEN_OK || echo LISTEN_FAIL
+      args:
+        executable: /bin/sh
+      changed_when: false
+      register: dhcp_listen
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          - "{{ dhcp_svc.stdout_lines | default([]) }}"
+          - "{{ dhcp_listen.stdout | trim }}"

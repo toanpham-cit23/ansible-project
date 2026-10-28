@@ -1,0 +1,67 @@
+---
+# NOTE: designed but NOT yet imported into master.yml.
+# Requires packages that are absent from the lab routers (see each task's
+# precondition), so importing it would fail the whole chain.
+# Originally 03_vlan.yml in the v2 playbook set, which numbered VLAN/NAT/DHCP as
+# 03/04/05 - renumbered here to avoid clashing with 03_ntp / 04_snmp / 05_acl.
+# 03_vlan.yml - 802.1Q sub-interfaces on the uplink
+#
+# Reads vlans + interfaces from SQLite. Requires iproute2 (busybox ip cannot
+# create VLAN devices). Persists via /etc/local.d so it survives reboot.
+- name: VLAN sub-interfaces
+  hosts: network_devices
+  gather_facts: no
+  vars:
+    uplink: "{{ uplink_iface | default('eth1') }}"
+    vlan_dev: "{{ uplink }}.{{ item }}"
+
+  tasks:
+    - name: Require iproute2
+      ansible.builtin.shell: command -v ip
+      changed_when: false
+      register: ip_bin
+      failed_when: ip_bin.rc != 0
+
+    - name: Load VLAN definitions
+      ansible.builtin.shell: |
+        sqlite3 {{ db_path }} -separator '|' \
+          "SELECT vlan_id, name FROM vlans WHERE site_id IS NULL OR site_id = \
+           (SELECT site_id FROM devices WHERE hostname='{{ inventory_hostname }}')"
+      delegate_to: localhost
+      register: vlan_rows
+      changed_when: false
+      when: db_path is defined
+
+    - name: Create sub-interfaces
+      ansible.builtin.shell: |
+        set -e
+        dev="{{ vlan_dev }}"
+        ip link show "$dev" >/dev/null 2>&1 || ip link add link {{ uplink }} name "$dev" type vlan id {{ item }}
+        ip link set "$dev" up
+        ip -d link show "$dev" | grep -q "vlan protocol 802.1Q id {{ item }}" \
+          && echo "VLAN_OK {{ item }}" || { echo "VLAN_FAIL {{ item }}"; exit 1; }
+      args:
+        executable: /bin/sh
+      loop: "{{ vlan_ids | default([]) }}"
+      register: vlan_result
+      changed_when: "'VLAN_OK' in vlan_result.stdout"
+
+    - name: Persist VLANs across reboot
+      ansible.builtin.copy:
+        dest: /etc/local.d/vlan.start
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          {% for v in vlan_ids | default([]) %}
+          ip link show {{ uplink }}.{{ v }} >/dev/null 2>&1 || \
+            ip link add link {{ uplink }} name {{ uplink }}.{{ v }} type vlan id {{ v }}
+          ip link set {{ uplink }}.{{ v }} up
+          {% endfor %}
+
+    - name: Enable the local service
+      ansible.builtin.shell: rc-update add local default 2>/dev/null || true
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ vlan_result.results | default([]) | map(attribute='stdout') | select('search','VLAN_OK') | list }}"

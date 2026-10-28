@@ -99,7 +99,7 @@
           && echo "CFG_OK: frr agentx" || echo "CFG_MISSING: frr agentx (04_snmp.yml)"
 
         ps | grep '[z]abbix_agentd' > /dev/null \
-          && echo "SERVICE_OK: zabbix-agent" || echo "SERVICE_DOWN: zabbix-agent (11_zabbix.yml)"
+          && echo "SERVICE_OK: zabbix-agent" || echo "SERVICE_DOWN: zabbix-agent"
       register: extended_check
       changed_when: false
       failed_when: false
