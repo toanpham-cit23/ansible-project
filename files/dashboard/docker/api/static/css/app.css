@@ -326,3 +326,30 @@ select.log-act {
 .filter-wrap .act .ic { width: 15px; height: 15px; display: block; }
 .log-toolbar input { height: 34px; }
 .log-toolbar .act { height: 34px; }
+
+/* ---- operations views (leases, shifts, alerts, analysis, discovery) ---- */
+/* Long MAC and log-line cells must wrap rather than force the table wider
+   than the viewport: the sidebar already eats 208px. */
+#view table { table-layout: auto; }
+#view td, #view th { overflow-wrap: anywhere; }
+.log-msg { max-width: 420px; word-break: break-word; }
+
+/* Inline rename field: it sits inside a cell and should not look like a form */
+input.lease-name {
+  padding: 5px 8px; background: var(--bg); border: 1px dashed var(--line);
+  border-radius: 3px; color: var(--ink); font-size: 12.5px;
+}
+input.lease-name:focus { border-style: solid; border-color: var(--accent); outline: none; }
+
+#view input:not([type=checkbox]), #view select {
+  padding: 6px 8px; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 4px; color: var(--ink); font-size: 13px;
+}
+#view input:focus, #view select:focus { border-color: var(--accent); outline: none; }
+
+/* The day checkboxes in the roster form read as a single line of labels */
+.sh-day { accent-color: var(--accent); }
+
+/* Sidebar has more entries now; keep it scrollable on short screens instead of
+   letting the logout button fall off the bottom. */
+.side nav { overflow-y: auto; }

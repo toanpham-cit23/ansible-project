@@ -17,9 +17,26 @@ services:
       GOMEMLIMIT: 40MiB
       ADMIN_USER: ${ADMIN_USER:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # the API sends the test mail and the handover redispatch, so it needs
+      # the same relay settings and the same outbox directory as the poller
+      MAIL_DIR: /data/outbox
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-25}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-lab@lab.local}
+      # optional DNS. The responder listens on a high port inside the
+      # container and is published on 53 outside, so it works without the
+      # CAP_NET_BIND_SERVICE the container deliberately does not have.
+      LAB_DNS_LISTEN: ${LAB_DNS_LISTEN:-:5353}
+      LAB_DNS_UPSTREAM: ${LAB_DNS_UPSTREAM:-}
+      LAB_DNS_PUBLIC_PORT: ${LAB_DNS_PUBLIC_PORT:-53}
     volumes:
       - ./db:/data
-    ports: ["8080:8000"]
+    ports:
+      - "8080:8000"
+      # UDP only: a zone this small is answered from memory in one packet
+      - "53:5353/udp"
     mem_limit: 80m
     cpus: 0.50
     read_only: true
@@ -41,8 +58,17 @@ services:
     environment:
       NETDB: /data/net.db
       NETDB_KEY: ${NETDB_KEY:-}
-      POLL_INTERVAL: "60"
+      # 5 s as required. The cadence is kept honest by subtracting the time a
+      # cycle takes, so a slow walk does not drift the interval.
+      POLL_INTERVAL: "5"
       ALERT_WEBHOOK: ${ALERT_WEBHOOK:-}
+      # where the .eml fallback lands when no SMTP relay is configured
+      MAIL_DIR: /data/outbox
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-25}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-lab@lab.local}
     volumes:
       - ./db:/data
     mem_limit: 48m

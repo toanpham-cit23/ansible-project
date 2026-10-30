@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Lab</title>
-<link rel="stylesheet" href="/static/css/app.css?v=13">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/css/app.css?v=15">
 </head>
 <body>
 <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden">
@@ -87,6 +88,30 @@
         <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4.2" y="3.2" width="15.6" height="17.6" rx="2.2"/><path d="M8 8h8M8 12h8M8 16h5"/></g></svg>
         <span class="lbl">Logs</span>
       </a>
+      <a href="#/leases" data-view="leases" draggable="false">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="4.4" width="17.6" height="15.2" rx="2.2"/><path d="M3.2 9.2h17.6M8.4 4.4v4.8M8.4 13h7.2M8.4 16.4h4.4"/></g></svg>
+        <span class="lbl">Leases</span>
+      </a>
+      <a href="#/reboots" data-view="reboots" draggable="false">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20.4 4.2v4.4h-4.4"/></g></svg>
+        <span class="lbl">Restarts</span>
+      </a>
+      <a href="#/analysis" data-view="analysis" draggable="false">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 19.6h16.8"/><path d="M6.4 19.6V11M11 19.6V5.6M15.6 19.6v-6.2M20 19.6v-4"/></g></svg>
+        <span class="lbl">Analysis</span>
+      </a>
+      <a href="#/shifts" data-view="shifts" draggable="false">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8.6" cy="8" r="3"/><path d="M3.4 19.4c0-2.9 2.3-5.2 5.2-5.2s5.2 2.3 5.2 5.2"/><path d="M16.4 6.2a3 3 0 0 1 0 5.6M17.6 14.6c1.9.7 3.2 2.5 3.2 4.8"/></g></svg>
+        <span class="lbl">Shifts</span>
+      </a>
+      <a href="#/alerts" data-view="alerts" draggable="false">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.4 6.4h15.2v10.4H4.4z"/><path d="m4.4 7 7.6 5.4L19.6 7"/></g></svg>
+        <span class="lbl">Alerts</span>
+      </a>
+      <a href="#/setup" data-view="setup" draggable="false">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6.4" cy="6.4" r="2.4"/><circle cx="17.6" cy="6.4" r="2.4"/><circle cx="12" cy="17.8" r="2.4"/><path d="M8.8 6.4h6.4M7.6 8.6l3.2 6.8M16.4 8.6l-3.2 6.8"/></g></svg>
+        <span class="lbl">Discovery</span>
+      </a>
       <a href="#/settings" data-view="settings" draggable="false">
         <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-settings"/></svg>
         <span class="lbl">Settings</span>
@@ -116,8 +141,8 @@
     <section id="view"></section>
   </main>
 </div>
-<script src="/static/js/api.js?v=13" defer></script>
-<script src="/static/js/chart.js?v=13" defer></script>
-<script src="/static/js/app.js?v=13" defer></script>
+<script src="/static/js/api.js?v=15" defer></script>
+<script src="/static/js/chart.js?v=15" defer></script>
+<script src="/static/js/app.js?v=15" defer></script>
 </body>
 </html>
