@@ -69,9 +69,16 @@
       ansible.builtin.copy:
         content: |
           # SNMP Configuration
-          rocommunity public 192.168.23.0/24
-          syslocation Data Center
-          syscontact admin@company.local
+          # Community is a variable so it is not fixed in source. Override with
+          #   -e snmp_community=<value>
+          # or set it per host in host_vars. The default is deliberately the
+          # well-known "public" so the lab matches the dashboard's seeded
+          # snmp_version '2c'; it is NOT suitable for any shared network.
+          # v2c sends the community in clear text on every request. For anything
+          # beyond an isolated lab, use v3 with auth and priv instead.
+          rocommunity {{ snmp_community | default('public') }} {{ snmp_allowed_net | default('192.168.23.0/24') }}
+          syslocation "{{ snmp_location | default('Data Center') }}"
+          syscontact {{ snmp_contact | default('admin@example.invalid') }}
           agentaddress udp:161
           master agentx
         dest: /etc/snmp/snmpd.conf

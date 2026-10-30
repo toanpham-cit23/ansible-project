@@ -5,13 +5,28 @@ token.yml
 .vault_pass
 **/id_rsa*
 **/*.pem
+**/*.key
+**/*.p12
 *.conf
+
+# The lab inventory carries plaintext credentials in this project
+# (ansible_password per host). It is environment-specific anyway, so it is
+# not source. hosts.ini.example is the committed template - copy it to
+# hosts.ini and fill in your own values.
+hosts.ini
+
+# Ansible Vault-encrypted payloads are fine to commit; the password used to
+# decrypt them is not. Listed here so the intent is explicit.
+!*.vault.yml
 
 # --- runtime data: local state, not source ---
 db/*.db
 db/*.db-wal
 db/*.db-shm
 **/net.db*
+db/outbox/
+**/*.sqlite
+**/*.sqlite3
 
 # --- ansible artefacts ---
 backups/
@@ -20,6 +35,15 @@ backups/
 devnull
 *.pre-*
 *.bak
+*.orig
+*.rej
+*.swp
+
+# Editor and OS noise that can leak local paths
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
 
 # --- vendor payloads that may carry credentials; the dashboard is source ---
 files/*
@@ -30,3 +54,6 @@ __pycache__/
 *.pyc
 dashboard.tar.gz
 dash-ansible.tar.gz
+
+# Local backup copies kept outside the tracked tree
+.local-backups/

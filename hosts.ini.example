@@ -1,0 +1,21 @@
+# Lab inventory template - FRR routers running Alpine Linux.
+#
+# Copy to hosts.ini and fill in your own values:
+#   cp hosts.ini.example hosts.ini
+#
+# hosts.ini is gitignored because it holds credentials. Supply the password
+# either inline (lab only) or, for anything shared, from Ansible Vault:
+#
+#   ansible_password: "{{ vault_router_password }}"
+#
+# Kept on one line per host because the inventory is INI, not YAML.
+
+[routers]
+r1 ansible_host=192.168.23.11 loopback_ip=1.1.1.1 ansible_user=root ansible_password=CHANGE_ME
+r2 ansible_host=192.168.23.12 loopback_ip=2.2.2.2 ansible_user=root ansible_password=CHANGE_ME
+r3 ansible_host=192.168.23.13 loopback_ip=3.3.3.3 ansible_user=root ansible_password=CHANGE_ME
+
+[routers:vars]
+ansible_connection=ssh
+# Informational only: the playbooks drive FRR through shell + vtysh, not network_cli.
+ansible_network_os=frr
