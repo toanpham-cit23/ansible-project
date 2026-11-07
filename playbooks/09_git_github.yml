@@ -77,19 +77,22 @@
       changed_when: "'NOTHING_TO_COMMIT' not in commit.stdout"
 
     - name: Push to GitHub
-      # The token never appears in the URL, in .git/config, or in the command
-      # line - it is passed through the environment as an HTTP header.
+      # The token is handed to git through a short-lived askpass helper, not in
+      # the URL. Embedding it in the URL does not survive GitHub's redirect to
+      # the canonical repo path (the userinfo is stripped and git then prompts
+      # for a username), and it would also persist in .git/config.
       ansible.builtin.shell: |
-        TOKEN=$(ansible-vault view "{{ project_dir }}/token.yml" \
-                  --vault-password-file "{{ project_dir }}/.vault_pass" 2>/dev/null \
-                | sed -n 's/^github_token:[[:space:]]*//p' | tr -d '\r\n')
-        if [ -z "$TOKEN" ]; then echo "TOKEN_DECRYPT_FAILED"; exit 1; fi
-        GIT_CONFIG_COUNT=1 \
-        GIT_CONFIG_KEY_0=http.extraheader \
-        GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer $TOKEN" \
-          git push -u origin main > /tmp/lab-push.log 2>&1
+        T=$(ansible-vault view "{{ project_dir }}/token.yml" \
+              --vault-password-file "{{ project_dir }}/.vault_pass" 2>/dev/null \
+            | sed -n 's/^github_token:[[:space:]]*//p' | tr -d '\r\n')
+        if [ -z "$T" ]; then echo "TOKEN_DECRYPT_FAILED"; exit 1; fi
+        A=$(mktemp /tmp/.lab-askpass.XXXXXX)
+        printf '#!/bin/sh\ncase "$1" in *[Uu]sername*) echo "x-access-token";; *) echo "%s";; esac\n' "$T" > "$A"
+        chmod 700 "$A"
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$A" git push -u origin main > /tmp/lab-push.log 2>&1
         RC=$?
-        sed -E "s#$TOKEN#<redacted>#g" /tmp/lab-push.log | tail -6
+        rm -f "$A"
+        sed -E "s#$T#<redacted>#g" /tmp/lab-push.log | tail -6
         rm -f /tmp/lab-push.log
         echo "PUSH_RC=$RC"
         exit $RC
