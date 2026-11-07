@@ -255,22 +255,43 @@ func withAdmin(h func(http.ResponseWriter, *http.Request, *User)) http.HandlerFu
 var attempts = map[string][]time.Time{}
 var attemptMu = make(chan struct{}, 1)
 
-func rateOK(ip string) bool {
+// loginWindow is how long a failed attempt keeps counting, and loginMaxFailures
+// is how many are tolerated inside it. Only failures are recorded: counting
+// successful logins against the budget locked out an operator who reloaded the
+// page a few times, which is exactly the person this is meant to let in.
+const (
+	loginWindow      = 5 * time.Minute
+	loginMaxFailures = 10
+)
+
+// rateBlocked reports whether this address has failed too often lately.
+func rateBlocked(ip string) bool {
 	attemptMu <- struct{}{}
 	defer func() { <-attemptMu }()
 	now := time.Now()
-	keep := []time.Time{}
+	keep := attempts[ip][:0]
 	for _, t := range attempts[ip] {
-		if now.Sub(t) < 5*time.Minute {
+		if now.Sub(t) < loginWindow {
 			keep = append(keep, t)
 		}
 	}
-	if len(keep) >= 5 {
-		attempts[ip] = keep
-		return false
-	}
-	attempts[ip] = append(keep, now)
-	return true
+	attempts[ip] = keep
+	return len(keep) >= loginMaxFailures
+}
+
+// rateFail records one failed attempt.
+func rateFail(ip string) {
+	attemptMu <- struct{}{}
+	defer func() { <-attemptMu }()
+	attempts[ip] = append(attempts[ip], time.Now())
+}
+
+// rateClearForget drops the history after a good login, so a correct password
+// always resets the counter.
+func rateClear(ip string) {
+	attemptMu <- struct{}{}
+	defer func() { <-attemptMu }()
+	delete(attempts, ip)
 }
 
 // ---------------------------------------------------------------- models
@@ -328,7 +349,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if i := strings.LastIndex(ip, ":"); i > 0 {
 		ip = ip[:i]
 	}
-	if !rateOK(ip) {
+	if rateBlocked(ip) {
 		fail(w, http.StatusTooManyRequests, "too many attempts")
 		return
 	}
@@ -344,10 +365,12 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	var hash string
 	err := db.QueryRow("SELECT id, pw_hash FROM users WHERE username = ?", body.Username).Scan(&id, &hash)
 	if err != nil || !verifyPassword(body.Password, hash) {
+		rateFail(ip)
 		logEvent(0, "warning", "login failed for user "+body.Username)
 		fail(w, http.StatusUnauthorized, "bad credentials")
 		return
 	}
+	rateClear(ip)
 	jti := randomToken(16)
 	if _, err := db.Exec(`INSERT INTO sessions(jti, user_id, expires_at, ip, ua)
 	                      VALUES (?,?,datetime('now', ?),?,?)`,
@@ -357,7 +380,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: "sess", Value: jwtSign(id, jti), Path: "/", MaxAge: tokenTTL,
-		HttpOnly: true, Secure: cookieSecure, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: cookieSecure || r.TLS != nil, SameSite: http.SameSiteStrictMode,
 	})
 	var role, name string
 	_ = db.QueryRow("SELECT username, role FROM users WHERE id = ?", id).Scan(&name, &role)
@@ -949,6 +972,7 @@ func ensureLogSchema() {
 	// additive columns; errors are "duplicate column", which is the steady state
 	_, _ = db.Exec("ALTER TABLE events ADD COLUMN sig TEXT")
 	_, _ = db.Exec("ALTER TABLE events ADD COLUMN action TEXT")
+	_, _ = db.Exec("ALTER TABLE events ADD COLUMN acked INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("CREATE INDEX IF NOT EXISTS ix_events_sig ON events(sig)")
 	// backfill signatures for rows written before this feature existed
 	rows, err := db.Query("SELECT id, COALESCE(device_id,0), severity, message FROM events WHERE sig IS NULL")
@@ -985,8 +1009,15 @@ func logEvent(deviceID int64, severity, message string) {
 	if isBlocked(sig) {
 		return
 	}
+	// The column is a foreign key to devices with enforcement on, so an event
+	// that belongs to no device - a login failure, a terminated connection -
+	// has to be NULL. Passing 0 made the insert fail and the event vanish.
+	var dev any
+	if deviceID > 0 {
+		dev = deviceID
+	}
 	_, _ = db.Exec("INSERT INTO events(device_id, severity, message, sig) VALUES (?,?,?,?)",
-		deviceID, severity, message, sig)
+		dev, severity, message, sig)
 }
 
 func levelOf(sev string) string {
@@ -1144,6 +1175,7 @@ func main() {
 	}
 	defer db.Close()
 	ensureLogSchema()
+	ensureLabSchema()
 	bootstrap()
 
 	mux := http.NewServeMux()
@@ -1169,6 +1201,53 @@ func main() {
 	mux.HandleFunc("GET /api/logs", withUser(handleLogs))
 	mux.HandleFunc("POST /api/logs/action", withAdmin(handleLogAction))
 
+	// ---- operations layer (lab.go)
+	mux.HandleFunc("GET /api/leases", withUser(handleLeases))
+	mux.HandleFunc("PATCH /api/leases/{id}", withAdmin(handlePatchLease))
+	// Terminating a connection is an operational action, so it is recorded in
+	// the lease history and filed as an event rather than silently flipping a
+	// flag: whoever picks up the next shift has to be able to see who cut what.
+	mux.HandleFunc("POST /api/leases/{id}/terminate", withAdmin(handleTerminateLease))
+	mux.HandleFunc("POST /api/leases/{id}/restore", withAdmin(handleRestoreLease))
+	mux.HandleFunc("GET /api/lease-events", withUser(handleLeaseEvents))
+	mux.HandleFunc("GET /api/reboots", withUser(handleReboots))
+	mux.HandleFunc("GET /api/reachability", withUser(handleReachability))
+	mux.HandleFunc("GET /api/poll", withUser(handlePollInfo))
+
+	mux.HandleFunc("GET /api/shifts", withUser(handleShifts))
+	mux.HandleFunc("PUT /api/shifts", withAdmin(handlePutShift))
+	mux.HandleFunc("DELETE /api/shifts/{id}", withAdmin(handleDeleteShift))
+	mux.HandleFunc("GET /api/handovers", withUser(handleHandovers))
+	mux.HandleFunc("POST /api/handover", withAdmin(handleHandover))
+
+	mux.HandleFunc("GET /api/alerts", withUser(handleAlerts))
+	mux.HandleFunc("PATCH /api/alerts/rules/{id}", withAdmin(handlePutAlertRule))
+	mux.HandleFunc("POST /api/alerts/test", withAdmin(handleTestAlert))
+	mux.HandleFunc("POST /api/alerts/redispatch", withAdmin(handleRedispatch))
+
+	mux.HandleFunc("GET /api/logs/analysis", withUser(handleLogAnalysis))
+	mux.HandleFunc("POST /api/logs/analysis/{id}/ack", withAdmin(handleAckFinding))
+	mux.HandleFunc("POST /api/events/{id}/ack", withAdmin(handleAckEvent))
+
+	mux.HandleFunc("POST /api/devices", withAdmin(handleAddDevice))
+	mux.HandleFunc("DELETE /api/devices/{id}", withAdmin(handleDeleteDevice))
+	mux.HandleFunc("POST /api/topology/discover", withAdmin(handleDiscover))
+	mux.HandleFunc("GET /api/topology/proposals", withUser(handleProposals))
+	mux.HandleFunc("POST /api/topology/proposals/{id}", withAdmin(handleDecideProposal))
+
+	mux.HandleFunc("GET /api/dns", withUser(handleDNS))
+	mux.HandleFunc("PUT /api/dns", withAdmin(handlePutDNS))
+	mux.HandleFunc("DELETE /api/dns/{id}", withAdmin(handleDeleteDNS))
+
+	// Operational surface. The controller does the work over SSH; these routes
+	// only read its status files and leave request markers for a host cron job.
+	mux.HandleFunc("GET /api/ops", withUser(handleOps))
+	mux.HandleFunc("GET /api/ops/telemetry", withUser(handleOpsTelemetry))
+	mux.HandleFunc("GET /api/ops/activity", withUser(handleOpsActivity))
+	mux.HandleFunc("GET /api/ops/gaps", withUser(handleOpsGaps))
+	mux.HandleFunc("POST /api/ops/snapshot", withAdmin(handleOpsSnapshot))
+	mux.HandleFunc("POST /api/ops/retention", withAdmin(handleOpsRetention))
+
 	noStore := func(p string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store, max-age=0")
@@ -1179,12 +1258,45 @@ func main() {
 	mux.HandleFunc("GET /app", noStore("app.html"))
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 
+	// One handler for both listeners. HSTS is only emitted for requests that
+	// actually arrived over TLS - sending it on plain HTTP would be ignored by
+	// browsers but would look like a promise the :8080 listener cannot keep.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		mux.ServeHTTP(w, r)
+	})
 	srv := &http.Server{
 		Addr:              ":8000",
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	// A trusted certificate is optional until a DuckDNS token exists. When the
+	// files appear, a second listener starts on 8443; :8080 stays up so the lab
+	// never loses its local entry point while certificates are being arranged.
+	if certPresent() {
+		port := env("TLS_PORT", "8443")
+		go func() {
+			tlsSrv := &http.Server{
+				Addr:              ":" + port,
+				Handler:           handler,
+				ReadHeaderTimeout: 5 * time.Second,
+				IdleTimeout:       60 * time.Second,
+			}
+			log.Println("TLS listening on :" + port)
+			if err := tlsSrv.ListenAndServeTLS(env("TLS_CERT", ""), env("TLS_KEY", "")); err != nil {
+				log.Println("TLS listener:", err)
+			}
+		}()
+	} else {
+		log.Println("no certificate at TLS_CERT - HTTPS listener disabled, HTTP :8000 only")
+	}
+	// optional: the same records that back the UI can be served as a real
+	// zone, so http://lab.local:8080 works without /etc/hosts
+	startDNS()
+
 	log.Println("listening on :8000")
 	log.Fatal(srv.ListenAndServe())
 }

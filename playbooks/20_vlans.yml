@@ -1,0 +1,64 @@
+---
+# VLAN plan - segmentation and load balancing across the core.
+#
+# The lab is one flat segment, so every router reports every binding and the
+# lease table was calling everything VLAN 1 seen on r1. That column was not
+# wrong, it was uninformative: "seen on" was whichever router the poll loop
+# reached first.
+#
+# This loads files/lab/vlans.yml into the database. The poller then reads
+# host_design and attributes each lease to the VLAN it belongs to and the
+# router that owns that VLAN - which is the answer a segmented network would
+# have produced, and it spreads the load 2 / 3 / 3 across r1 / r2 / r3 instead
+# of piling it all on r1.
+#
+#   ansible-playbook playbooks/20_vlans.yml
+#   ansible-playbook playbooks/20_vlans.yml -e @files/lab/vlans.yml   # same thing
+#
+# Re-running is safe: vlans is replaced, subnets and host_design are upserted,
+# and leases are relabelled in place.
+- name: VLAN plan - segmentation and load balancing
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    lab_dir: /root/lab
+    plan_file: "{{ playbook_dir }}/../files/lab/vlans.yml"
+    seed_file: "{{ playbook_dir }}/../files/lab/seed_design.py"
+
+  tasks:
+    - name: Read the plan
+      ansible.builtin.include_vars:
+        file: "{{ plan_file }}"
+        name: plan
+
+    - name: Refuse a plan that points a host at a VLAN it never defines
+      ansible.builtin.assert:
+        that:
+          - plan.hosts | map(attribute='vlan') | unique | difference(plan.vlans | map(attribute='id') | list) | list | length == 0
+        fail_msg: >-
+          hosts reference VLANs that are not defined:
+          {{ plan.hosts | map(attribute='vlan') | unique | difference(plan.vlans | map(attribute='id') | list) | list }}
+        success_msg: "every host lands in a defined VLAN"
+
+    - name: Render the plan where the poller can read it
+      ansible.builtin.copy:
+        dest: "{{ lab_dir }}/db/design.json"
+        mode: "0644"
+        content: "{{ {'vlans': plan.vlans, 'hosts': plan.hosts} | to_nice_json }}"
+
+    - name: Copy the loader into the container's data volume
+      ansible.builtin.copy:
+        src: "{{ seed_file }}"
+        dest: "{{ lab_dir }}/db/seed_design.py"
+        mode: "0644"
+
+    - name: Load it
+      ansible.builtin.command: docker exec lab-poller python3 /data/seed_design.py
+      register: seeded
+      changed_when: "'relabelled' in seeded.stdout"
+
+    - name: Report the balance
+      ansible.builtin.debug:
+        msg: "{{ seeded.stdout_lines }}"

@@ -1,0 +1,40 @@
+---
+# VLAN plan for the lab.
+#
+# This is the segmentation the network is designed to have, one VLAN per
+# function and one router owning each VLAN's gateway. `playbooks/20_vlans.yml`
+# loads it into the database, where the poller reads it: on a flat segment every
+# router sees every host, so without this file "seen on" is whichever router the
+# poller happened to reach first and every lease claims VLAN 1.
+#
+# Load balancing is deliberate: r1 owns 2 VLANs, r2 owns 3, r3 owns 3. Move a
+# line between routers and the balance moves with it - nothing else to edit.
+#
+# NOTE: tagged frames cannot reach these VLANs in the current lab. The
+# controller and the routers sit on one untagged VMware port group, and the
+# three switches are drawn, not cabled. The VLANs are real in the inventory and
+# on every lease; they become real on the wire the day the switches exist.
+
+vlans:
+  - { id: 10, name: Accounting,        cidr: 10.10.10.0/24,  gateway: 10.10.10.254,  router: r1 }
+  - { id: 20, name: HR,                cidr: 10.10.20.0/24,  gateway: 10.10.20.254,  router: r1 }
+  - { id: 40, name: Sales,             cidr: 10.10.40.0/24,  gateway: 10.10.40.254,  router: r2 }
+  - { id: 60, name: Wireless internal, cidr: 10.10.60.0/24,  gateway: 10.10.60.254,  router: r2 }
+  - { id: 70, name: Servers,           cidr: 10.10.70.0/24,  gateway: 10.10.70.254,  router: r2 }
+  - { id: 50, name: Director,          cidr: 10.10.50.0/24,  gateway: 10.10.50.254,  router: r3 }
+  - { id: 90, name: CCTV,              cidr: 10.10.90.0/24,  gateway: 10.10.90.254,  router: r3 }
+  - { id: 95, name: Recorder,          cidr: 10.10.95.0/24,  gateway: 10.10.95.254,  router: r3 }
+  - { id: 99, name: Management,        cidr: 192.168.23.0/24, gateway: 192.168.23.1, router: "" }
+
+# Every host the lab expects to exist, by MAC. This has to agree with
+# LAB.hosts in static/js/app.js and HOSTS in files/sim/simctl.py: the MAC is the
+# only identifier all three share.
+hosts:
+  - { mac: "02:00:00:00:0A:01", name: "Accounting PC", vlan: 10, switch: s1, router: r1 }
+  - { mac: "02:00:00:00:14:01", name: "HR PC",         vlan: 20, switch: s1, router: r1 }
+  - { mac: "02:00:00:00:28:01", name: "Sales PC",      vlan: 40, switch: s2, router: r2 }
+  - { mac: "02:00:00:00:3C:01", name: "Access point",  vlan: 60, switch: s2, router: r2 }
+  - { mac: "02:00:00:00:46:01", name: "File server",   vlan: 70, switch: s2, router: r2 }
+  - { mac: "02:00:00:00:32:01", name: "Director PC",   vlan: 50, switch: s3, router: r3 }
+  - { mac: "02:00:00:00:5F:01", name: "NVR",           vlan: 95, switch: s3, router: r3 }
+  - { mac: "02:00:00:00:5A:01", name: "Camera",        vlan: 90, switch: s3, router: r3 }

@@ -1,0 +1,1378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Core network simulator - packets, address assignment, gateway failover</title>
+<style>
+  /* Same tokens as the dashboard, so the sandbox does not look like a
+     different product bolted on. */
+  :root{
+    --bg:#f4f5f7; --card:#ffffff; --ink:#1f2328; --muted:#5b6169;
+    --line:#e2e5e9; --soft:#f7f8fa; --accent:#1e7b34;
+    --ok:#1e7b34; --bad:#b3261e; --warn:#b8860b; --blue:#185fa5;
+    --shadow:0 1px 2px rgba(20,20,18,.05), 0 6px 20px rgba(20,20,18,.05);
+  }
+  html[data-theme="dark"]{
+    --bg:#111217; --card:#181b1f; --ink:#e4e5e7; --muted:#9aa0a6;
+    --line:#23262b; --soft:#1f2227; --accent:#73bf69;
+    --ok:#73bf69; --bad:#f2495c; --warn:#fade2a; --blue:#5794f2;
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.28);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;
+    font-size:14px; line-height:1.5; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1560px; margin:0 auto; padding:20px 22px 40px}
+  .sandbox{
+    display:flex; gap:9px; align-items:flex-start; margin-bottom:14px;
+    padding:9px 12px; border:1px solid var(--line); border-left:3px solid var(--warn);
+    border-radius:8px; background:var(--soft); font-size:12.5px; color:var(--muted);
+  }
+  .sandbox b{color:var(--ink); font-weight:600}
+
+  header.top{display:flex; align-items:flex-start; gap:16px; flex-wrap:wrap; margin-bottom:16px}
+  h1{font-size:19px; font-weight:650; margin:0 0 2px; letter-spacing:-.01em}
+  header.top p{margin:0; color:var(--muted); font-size:12.5px}
+  .spacer{flex:1}
+  .tools{display:flex; gap:7px; align-items:center; flex-wrap:wrap}
+  button{
+    font:inherit; font-size:12.5px; height:32px; padding:0 11px; cursor:pointer;
+    background:var(--card); color:var(--ink); border:1px solid var(--line); border-radius:8px;
+  }
+  button:hover{background:var(--soft)}
+  button:active{transform:translateY(1px)}
+  button:disabled{opacity:.45; cursor:not-allowed}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600}
+  html[data-theme="dark"] button.primary{color:#0b1f18}
+  button.danger{border-color:var(--bad); color:var(--bad)}
+  button[aria-pressed="true"]{border-color:var(--accent); color:var(--accent)}
+
+  .grid{display:grid; grid-template-columns:minmax(0,1fr) 372px; gap:14px; align-items:start}
+  @media (max-width:1180px){ .grid{grid-template-columns:1fr} }
+
+  .panel{background:var(--card); border:1px solid var(--line); border-radius:13px; box-shadow:var(--shadow)}
+  .panel .hd{display:flex; align-items:center; gap:9px; padding:11px 14px 0; flex-wrap:wrap}
+  .panel .hd h2{font-size:13.5px; font-weight:640; margin:0}
+  .panel .hd .sub{font-size:11.5px; color:var(--muted)}
+
+  .stage{position:relative; padding:0 6px 6px}
+  .stage svg{display:block; width:100%; height:auto}
+  .stage svg text{pointer-events:none}
+  g.dev{cursor:pointer}
+  g.dev:hover rect[data-body]{filter:brightness(.96)}
+  html[data-theme="dark"] g.dev:hover rect[data-body]{filter:brightness(1.3)}
+  g.dev.is-sel rect[data-body]{stroke-width:2.2}
+
+  .hud{
+    position:absolute; left:14px; top:8px; display:flex; gap:6px; flex-wrap:wrap;
+    font-size:11px; pointer-events:none;
+  }
+  .hud span{
+    background:var(--card); border:1px solid var(--line); border-radius:99px;
+    padding:2px 9px; color:var(--muted);
+  }
+  .hud b{color:var(--ink); font-variant-numeric:tabular-nums}
+
+  .ctl{display:flex; gap:7px; align-items:center; padding:0 14px 12px; flex-wrap:wrap}
+  .ctl .group{display:flex; gap:5px; align-items:center; background:var(--soft); border-radius:9px; padding:4px}
+  .ctl label{font-size:11.5px; color:var(--muted); padding-left:3px}
+  select{
+    font:inherit; font-size:12.5px; height:30px; padding:0 7px; border-radius:7px;
+    background:var(--card); color:var(--ink); border:1px solid var(--line);
+  }
+  .speed{display:flex; gap:3px}
+  .speed button{height:28px; padding:0 8px; font-size:12px; border-radius:6px}
+  .speed button[aria-pressed="true"]{background:var(--accent); border-color:var(--accent); color:#fff}
+  html[data-theme="dark"] .speed button[aria-pressed="true"]{color:#0b1f18}
+
+  /* sidebar */
+  .side{display:flex; flex-direction:column; gap:14px}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:13px; box-shadow:var(--shadow); overflow:hidden}
+  .card h3{margin:0; padding:10px 13px; font-size:12.5px; font-weight:640; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center}
+  .card h3 .n{font-size:11px; color:var(--muted); font-weight:400}
+
+  table{width:100%; border-collapse:collapse; font-size:11.5px}
+  th,td{text-align:left; padding:5px 9px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{color:var(--muted); font-weight:500; font-size:10.5px; text-transform:uppercase; letter-spacing:.03em; position:sticky; top:0; background:var(--card)}
+  tr:last-child td{border-bottom:0}
+  td code, .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px}
+  .scroll{max-height:232px; overflow:auto; scrollbar-width:thin}
+  .scroll::-webkit-scrollbar{width:8px}
+  .scroll::-webkit-scrollbar-thumb{background:var(--line); border-radius:4px}
+
+  .arp-row.up{color:var(--ink)}
+  .arp-row.stale{color:var(--warn)}
+  .empty{padding:16px 13px; color:var(--muted); font-size:12px; text-align:center}
+
+  #log{max-height:262px; overflow:auto; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:10.8px; line-height:1.5}
+  #log div{padding:3px 11px; border-bottom:1px solid var(--line); display:flex; gap:7px}
+  #log div:last-child{border-bottom:0}
+  #log .t{color:var(--muted); flex:0 0 46px; text-align:right}
+  #log .m{flex:1; word-break:break-word}
+  .l-arp{color:var(--blue)} .l-dhcp{color:var(--ok)} .l-icmp{color:var(--ink)}
+  .l-drop{color:var(--bad)} .l-vrrp{color:var(--warn)} .l-stp{color:var(--muted)}
+  .l-sys{color:var(--muted)}
+
+  .pill{display:inline-block; font-size:10px; font-weight:600; padding:1px 6px; border-radius:99px}
+  .pill.up{background:color-mix(in srgb, var(--ok) 18%, transparent); color:var(--ok)}
+  .pill.dn{background:color-mix(in srgb, var(--bad) 18%, transparent); color:var(--bad)}
+  .pill.mid{background:color-mix(in srgb, var(--warn) 20%, transparent); color:var(--warn)}
+
+  .tip{
+    position:fixed; z-index:60; pointer-events:none; opacity:0; transition:opacity .1s;
+    background:var(--card); border:1px solid var(--line); border-radius:9px;
+    padding:7px 10px; font-size:11.5px; max-width:280px; box-shadow:0 8px 26px rgba(20,20,18,.18);
+  }
+  .tip.on{opacity:1}
+  .tip b{display:block; font-size:12px}
+  .tip .d{color:var(--muted); font-size:11px; margin-top:1px}
+
+  .hint{font-size:11.5px; color:var(--muted); padding:0 14px 11px}
+  .hint b{color:var(--ink); font-weight:600}
+
+  /* fault panel */
+  .faults{border-top:1px solid var(--line); margin:0 14px; padding:11px 0 13px}
+  .faults-hd{display:flex; align-items:baseline; gap:9px; margin-bottom:9px; flex-wrap:wrap}
+  .faults-hd h3{font-size:12px; font-weight:640; margin:0; text-transform:uppercase; letter-spacing:.04em; color:var(--muted)}
+  .faults-hd .sub{font-size:11.5px; color:var(--muted)}
+  button.small{height:26px; font-size:11.5px; padding:0 9px}
+
+  .fault-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(196px,1fr)); gap:6px}
+  .fault{
+    display:flex; align-items:center; gap:7px; text-align:left;
+    height:auto; min-height:34px; padding:5px 9px; border-radius:8px;
+    border:1px solid var(--line); background:var(--card); color:var(--ink);
+    font-size:11.5px; line-height:1.3;
+  }
+  .fault:hover{background:var(--soft)}
+  .fault .dot{
+    flex:0 0 auto; width:8px; height:8px; border-radius:99px;
+    background:var(--line); border:1px solid var(--muted);
+  }
+  .fault .lbl{flex:1; min-width:0}
+  .fault .lbl b{display:block; font-weight:600; font-size:11.5px}
+  .fault .lbl span{display:block; color:var(--muted); font-size:10.5px}
+  .fault.on{border-color:var(--bad); background:color-mix(in srgb, var(--bad) 10%, transparent)}
+  .fault.on .dot{background:var(--bad); border-color:var(--bad)}
+  .fault.on .lbl b{color:var(--bad)}
+  .fault.warnon{border-color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent)}
+  .fault.warnon .dot{background:var(--warn); border-color:var(--warn)}
+  .fault.warnon .lbl b{color:var(--warn)}
+  .fault:disabled{opacity:.5; cursor:not-allowed}
+
+  /* legend */
+  .legend{display:grid; grid-template-columns:1fr 1fr; gap:5px 10px; padding:10px 12px 12px}
+  .legend span{display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted)}
+  .legend i{flex:0 0 auto; width:16px; height:3px; border-radius:2px}
+
+  @media print{ .tools,.ctl,.side,.faults{display:none} .grid{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="sandbox">
+    <span><b>Sandbox.</b> This page runs its own model - its own devices, its own
+    addressing, its own faults. Nothing here reads or changes the lab, the database
+    or the real routers, so it is safe to break.</span>
+  </div>
+
+  <header class="top">
+    <div>
+      <h1>Core network simulator</h1>
+      <p>Packets are routed for real: address resolution, address assignment, routing between virtual segments, and failover when a router goes down.</p>
+    </div>
+    <div class="spacer"></div>
+    <div class="tools">
+      <button id="btn-theme" aria-pressed="false">Dark mode</button>
+      <button id="btn-reset">Reset</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- stage -->
+    <div class="panel">
+      <div class="hd">
+        <h2>Live diagram</h2>
+        <span class="sub" id="stage-sub">pick a source and a destination, then press Send</span>
+      </div>
+      <div class="stage" id="stage">
+        <div class="hud">
+          <span>In flight <b id="hud-inflight">0</b></span>
+          <span>Sent <b id="hud-sent">0</b></span>
+          <span>Delivered <b id="hud-ok">0</b></span>
+          <span>Dropped <b id="hud-drop">0</b></span>
+        </div>
+        <div data-svg></div>
+      </div>
+      <div class="ctl">
+        <div class="group">
+          <label for="src">Source</label>
+          <select id="src"></select>
+          <label for="dst">Destination</label>
+          <select id="dst"></select>
+          <button class="primary" id="btn-send">Send packet</button>
+        </div>
+        <div class="group">
+          <label>Speed</label>
+          <div class="speed" id="speed">
+            <button data-sp="0.25">¼×</button>
+            <button data-sp="1" aria-pressed="true">1×</button>
+            <button data-sp="4">4×</button>
+          </div>
+        </div>
+        <div class="group">
+          <button id="btn-kill1">Kill r1</button>
+          <button id="btn-kill2">Kill r2</button>
+          <button id="btn-stp">Enable loop protection</button>
+        </div>
+      </div>
+
+      <!-- faults -->
+      <div class="faults">
+        <div class="faults-hd">
+          <h3>Faults</h3>
+          <span class="sub" id="fault-summary">no faults</span>
+          <div class="spacer"></div>
+          <button id="btn-clear-faults" class="small">Clear all faults</button>
+        </div>
+        <div class="fault-grid" id="fault-grid"></div>
+      </div>
+
+      <div class="hint" id="hint">
+        <b>Try this:</b> pick <b>Accounting PC</b> as the source and <b>Internal server</b> as the destination - the packet leaves through the virtual gateway, not the router's own address.
+        Press <b>Kill r1</b> and send again to watch the virtual gateway move to r2.
+        In the <b>Faults</b> panel below, try <b>core cable cut</b> to see the path re-route, or <b>loss</b> to see packets dropped at random.
+      </div>
+    </div>
+
+    <!-- side panels -->
+    <div class="side">
+      <div class="card">
+        <h3>Physical address table <span class="n" id="arp-count">0 entries</span></h3>
+        <div class="scroll"><table id="arp"><thead><tr><th>Device</th><th>Address</th><th>Physical mapping</th><th></th></tr></thead><tbody></tbody></table></div>
+      </div>
+      <div class="card">
+        <h3>Virtual gateway state <span class="n" id="vrrp-count">2 groups</span></h3>
+        <div class="scroll"><table id="vrrp"><thead><tr><th>Group</th><th>Held by</th><th>Priority</th><th></th></tr></thead><tbody></tbody></table></div>
+      </div>
+      <div class="card">
+        <h3>Legend</h3>
+        <div class="legend" id="legend">
+          <span><i style="background:var(--blue)"></i>Core primary</span>
+          <span><i style="background:var(--ok)"></i>Standby</span>
+          <span><i style="background:var(--muted);opacity:.55"></i>Routing session</span>
+          <span><i style="background:var(--accent)"></i>Management</span>
+          <span><i style="background:var(--bad)"></i>Cut / device down</span>
+          <span><i style="background:var(--warn)"></i>Loss / overload</span>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Event log <span class="n" id="log-n">0</span></h3>
+        <div id="log"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script>
+/* PART 1 - NETWORK MODEL
+   Each device has ports; each port belongs to a virtual segment.
+   Packets move hop by hop, with delay, and actually consult the
+   routing table and the physical address table at every step. */
+
+const VLANS = {
+  10:{ name:'Accounting',    cidr:'10.10.10.0/24', net:'10.10.10',   vip:'10.10.10.254' },
+  20:{ name:'HR',    cidr:'10.10.20.0/24', net:'10.10.20',   vip:'10.10.20.254' },
+  30:{ name:'Engineering',   cidr:'10.10.30.0/24', net:'10.10.30',   vip:'10.10.30.254' },
+  40:{ name:'Sales', cidr:'10.10.40.0/24', net:'10.10.40',   vip:'10.10.40.254' },
+  50:{ name:'Director',   cidr:'10.10.50.0/24', net:'10.10.50',   vip:'10.10.50.254' },
+  60:{ name:'Wireless internal', cidr:'10.10.60.0/24', net:'10.10.60', vip:'10.10.60.254' },
+  70:{ name:'Internal server',  cidr:'10.10.70.0/24', net:'10.10.70', vip:'10.10.70.254' },
+  80:{ name:'Guest wireless',  cidr:'10.10.80.0/24', net:'10.10.80', vip:'10.10.80.254' },
+  90:{ name:'Camera',   cidr:'10.10.90.0/24', net:'10.10.90',   vip:'10.10.90.254' },
+  95:{ name:'Recorder', cidr:'10.10.95.0/24', net:'10.10.95', vip:'10.10.95.254' },
+  99:{ name:'Management',   cidr:'192.168.23.0/24', net:'192.168.23', vip:'192.168.23.254' }
+};
+
+/* Device. x/y is the centre on a 900 x 560 canvas.
+   ports: each port is bound to a virtual segment label (or 'trunk'). */
+const DEVS = [
+  { id:'ctl', kind:'server', x:450, y:44,  w:200, h:46,
+    t1:'Controller', t2:'192.168.23.10',
+    ports:{ eth0:{ ip:'192.168.23.10', vlan:99 } } },
+
+  { id:'r1', kind:'router', x:300, y:150, w:180, h:52,
+    t1:'r1 · Core primary', t2:'priority 120',
+    ports:{
+      eth1:{ ip:'192.168.23.11', vlan:99 },
+      s10:{ ip:'10.10.10.252', vlan:10 }, s20:{ ip:'10.10.20.252', vlan:20 },
+      s30:{ ip:'10.10.30.252', vlan:30 }, s40:{ ip:'10.10.40.252', vlan:40 },
+      s50:{ ip:'10.10.50.252', vlan:50 }, s60:{ ip:'10.10.60.252', vlan:60 },
+      s70:{ ip:'10.10.70.252', vlan:70 }, s80:{ ip:'10.10.80.252', vlan:80 },
+      s90:{ ip:'10.10.90.252', vlan:90 }, s95:{ ip:'10.10.95.252', vlan:95 }
+    },
+    prio:120 },
+
+  { id:'r2', kind:'router', x:600, y:150, w:180, h:52,
+    t1:'r2 · Core standby', t2:'priority 100',
+    ports:{
+      eth1:{ ip:'192.168.23.12', vlan:99 },
+      s10:{ ip:'10.10.10.253', vlan:10 }, s20:{ ip:'10.10.20.253', vlan:20 },
+      s30:{ ip:'10.10.30.253', vlan:30 }, s40:{ ip:'10.10.40.253', vlan:40 },
+      s50:{ ip:'10.10.50.253', vlan:50 }, s60:{ ip:'10.10.60.253', vlan:60 },
+      s70:{ ip:'10.10.70.253', vlan:70 }, s80:{ ip:'10.10.80.253', vlan:80 },
+      s90:{ ip:'10.10.90.253', vlan:90 }, s95:{ ip:'10.10.95.253', vlan:95 }
+    },
+    prio:100 },
+
+  { id:'s1', kind:'switch', x:210, y:262, w:130, h:44, t1:'Switch 1', t2:'802.1Q trunk' },
+  { id:'s2', kind:'switch', x:450, y:262, w:130, h:44, t1:'Switch 2', t2:'802.1Q trunk' },
+  { id:'s3', kind:'switch', x:690, y:262, w:130, h:44, t1:'Switch 3', t2:'802.1Q trunk' },
+
+  { id:'pc10', kind:'host', x:95,  y:372, w:122, h:42, t1:'Accounting PC',   vlan:10, dhcp:true, t2:'' },
+  { id:'pc20', kind:'host', x:236, y:372, w:122, h:42, t1:'HR PC',   vlan:20, dhcp:true, t2:'' },
+  { id:'pc40', kind:'host', x:450, y:372, w:122, h:42, t1:'Sales PC',vlan:40, dhcp:true, t2:'' },
+  { id:'pc50', kind:'host', x:592, y:372, w:122, h:42, t1:'Director PC',  vlan:50, dhcp:true, t2:'' },
+  { id:'ap',   kind:'host', x:734, y:372, w:122, h:42, t1:'Access point',vlan:60, dhcp:true, t2:'' },
+
+  { id:'srv',  kind:'host', x:330, y:462, w:132, h:42, t1:'Internal server', vlan:70, ip:'10.10.70.10',  t2:'' },
+  { id:'nvr',  kind:'host', x:560, y:462, w:132, h:42, t1:'Recorder',   vlan:95, ip:'10.10.95.10',  t2:'' },
+  { id:'cam',  kind:'host', x:760, y:462, w:132, h:42, t1:'Camera',       vlan:90, dhcp:true, t2:'' }
+];
+const DEV = Object.fromEntries(DEVS.map(d=>[d.id,d]));
+
+/* Physical links. mult>1 means parallel paths exist
+   (a primary and a spare) - that is what loop protection is about. */
+const LINKS = [
+  { a:'ctl', b:'r1', ka:'eth0', kb:'eth1', type:'mgmt' },
+  { a:'ctl', b:'r2', ka:'eth0', kb:'eth1', type:'mgmt' },
+  { a:'r1',  b:'r2', ka:'peering', kb:'peering', type:'ospf' },
+  { a:'r1',  b:'s1', type:'primary' },
+  { a:'r1',  b:'s2', type:'primary' },
+  { a:'r2',  b:'s2', type:'primary' },
+  { a:'r2',  b:'s3', type:'primary' },
+  { a:'r1',  b:'s3', type:'backup' },
+  { a:'r2',  b:'s1', type:'backup' },
+  { a:'s1',  b:'pc10', type:'access' },
+  { a:'s1',  b:'pc20', type:'access' },
+  { a:'s2',  b:'pc40', type:'access' },
+  { a:'s2',  b:'srv',  type:'access' },
+  { a:'s3',  b:'pc50', type:'access' },
+  { a:'s3',  b:'ap',   type:'access' },
+  { a:'s3',  b:'nvr',  type:'access' },
+  { a:'s3',  b:'cam',  type:'access' }
+];
+
+/* runtime state */
+const NET = {
+  up:{ r1:true, r2:true },
+  stp:false,
+  arp:{},          // deviceId -> { ip -> {mac, port, ts} }
+  macOf:{},        // deviceId -> unicast MAC (gia lap)
+  vrrp:{},         // vlan -> deviceId currently holding the gateway
+  dhcp:new Map(),  // deviceId -> leased ip
+  /* faults
+     fl: link faults, keyed by the sorted "a|b"
+     fd: device faults, keyed by device id
+     dhcpFull: segment labels whose address pool is exhausted
+     vrrpTie: both routers share a priority (split) */
+  fl:{}, fd:{}, dhcpFull:new Set(), vrrpTie:false,
+  inflight:0, sent:0, ok:0, drop:0
+};
+
+/* link key, independent of which end comes first */
+const lk = (a,b)=> [a,b].sort().join('|');
+
+/* state of one link; the default is normal */
+function linkState(a,b){
+  return NET.fl[lk(a,b)] || null;
+}
+/* state of one device */
+function devState(id){
+  return NET.fd[id] || null;
+}
+
+/* simulated MAC, stable per device name */
+function macFor(id){
+  if (!NET.macOf[id]){
+    let h=0;
+    for (let i=0;i<id.length;i++) h=(h*31+id.charCodeAt(i))>>>0;
+    NET.macOf[id] = '02:00:' + [(h>>16)&255,(h>>8)&255,h&255]
+      .map(n=>n.toString(16).padStart(2,'0').toUpperCase()).join(':');
+  }
+  return NET.macOf[id];
+}
+
+/* Virtual gateway: the highest-priority router among those alive.
+   The management segment (label 99) sits on eth1; the others sit on
+   sub-interfaces named after their label (s10, s20, ...). */
+function portNameFor(vlan){ return vlan === 99 ? 'eth1' : 's' + vlan; }
+
+/* Can this device forward at all?
+   Down means dead; overloaded means alive but slow and lossy. */
+function devAlive(id){
+  if (id==='r1'||id==='r2') return NET.up[id];
+  const st = devState(id);
+  return !(st && st.kind==='down');
+}
+
+/* May this router hold the virtual gateway?
+   - down: no
+   - uplink lost: no, the gateway must still have a way out
+   - overloaded: yes, but it will drop packets when sending */
+function routerUsable(id, vlan){
+  if (!NET.up[id]) return false;
+  const st = devState(id);
+  if (st && st.kind==='down') return false;
+  if (st && st.kind==='uplink') return false;
+  return !!DEV[id].ports[portNameFor(vlan)];
+}
+
+function vrrpOwner(vlan){
+  let alive = ['r1','r2'].filter(r=>routerUsable(r, vlan));
+  if (!alive.length) return null;
+  // with equal priority both sides think they are master -> split
+  if (NET.vrrpTie && alive.length === 2){
+    return alive[0];   // still returns one side, but sendPacket handles the split
+  }
+  return alive.sort((a,b)=>DEV[b].prio-DEV[a].prio)[0];
+}
+function vrrpSplit(vlan){
+  return NET.vrrpTie && ['r1','r2'].every(r=>routerUsable(r, vlan));
+}
+function vrrpVipOf(vlan){ return VLANS[vlan] ? VLANS[vlan].vip : null; }
+
+/* A host's address:
+   - end devices: static configuration (d.ip) or a leased address
+   - controller / routers: taken from their management port */
+function ipOf(id){
+  const d = DEV[id];
+  if (!d) return null;
+  if (d.ip) return d.ip;
+  if (NET.dhcp.has(id)) return NET.dhcp.get(id);
+  if (d.ports){
+    const p = d.ports.eth0 || d.ports.eth1;
+    if (p && p.ip) return p.ip;
+  }
+  return null;
+}
+/* the virtual segment the device sits in */
+function vlanOf(id){
+  const d = DEV[id];
+  if (!d) return null;
+  if (d.vlan != null) return d.vlan;
+  const p = d.ports && (d.ports.eth0 || d.ports.eth1);
+  return p && p.vlan != null ? p.vlan : null;
+}
+
+/* A router's routing table: every virtual segment is directly connected */
+function routeLookup(routerId, dstIp){
+  const r = DEV[routerId];
+  if (!r || !NET.up[routerId]) return null;
+  for (const [port,p] of Object.entries(r.ports)){
+    const v = VLANS[p.vlan];
+    if (!v) continue;
+    if (inSubnet(dstIp, v.net)) return { port, vlan:p.vlan, iface:p.ip, gateway:null, kind:'connected' };
+  }
+  return null;
+}
+function inSubnet(ip, netPrefix){ return ip.startsWith(netPrefix + '.'); }
+function isSameSubnet(a,b){
+  const pa=a.split('.').slice(0,3).join('.'), pb=b.split('.').slice(0,3).join('.');
+  return pa===pb;
+}
+
+/* PART 2 - LOG */
+const LOG = [];
+function log(kind, msg){
+  LOG.push({ kind, msg, t: new Date() });
+  if (LOG.length > 220) LOG.shift();
+  renderLog();
+}
+const LOG_CLASS = { arp:'l-arp', dhcp:'l-dhcp', icmp:'l-icmp', drop:'l-drop', vrrp:'l-vrrp', stp:'l-stp', sys:'l-sys' };
+function renderLog(){
+  const box = document.getElementById('log');
+  box.innerHTML = LOG.slice(-160).map((l,i)=>
+    `<div><span class="t">${String(l.t.getSeconds()).padStart(2,'0')}.${String(Math.floor(l.t.getMilliseconds()/10)).padStart(2,'0')}</span>`
+  + `<span class="m ${LOG_CLASS[l.kind]||''}">${esc(l.msg)}</span></div>`).join('');
+  box.scrollTop = box.scrollHeight;
+  document.getElementById('log-n').textContent = LOG.length;
+}
+function esc(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/* PART 3 - DRAWING */
+const THEME = {
+  light:{ bg:'#fff', ink:'#1b1b19', muted:'#5f5e5a', line:'#e2e1da',
+    srvF:'#9FE1CB', srvS:'#1D9E75', srvT:'#085041',
+    rtrF:'#B5D4F4', rtrS:'#378ADD', rtrT:'#0C447C',
+    swF:'#FAEEDA',  swS:'#BA7517',  swT:'#633806',
+    hostF:'#fff',   hostS:'#378ADD',hostT:'#0C447C',
+    infraF:'#fff',  infraS:'#1D9E75',infraT:'#085041',
+    primary:'#378ADD', backup:'#1D9E75', ospf:'#8A8A84', mgmt:'#159C74', access:'#B9B8B1',
+    dead:'#C0392B', warn:'#C97A0E', warnF:'#FDF3E2', warnS:'#E0A33A',
+    pkt:'#C0392B', pktOk:'#1D9E75', hl:'#C0392B' },
+  dark:{ bg:'#1d1d1b', ink:'#ecebe4', muted:'#a3a29b', line:'#33322e',
+    srvF:'#0F3D31', srvS:'#5DCAA5', srvT:'#9FE1CB',
+    rtrF:'#0C2C4E', rtrS:'#6BA8F0', rtrT:'#B5D4F4',
+    swF:'#3A2B0D',  swS:'#E0A33A',  swT:'#FAEEDA',
+    hostF:'#16233A',hostS:'#6BA8F0',hostT:'#CFE3FB',
+    infraF:'#102C24',infraS:'#5DCAA5',infraT:'#A8E5CE',
+    primary:'#6BA8F0', backup:'#5DCAA5', ospf:'#9A9A93', mgmt:'#4FC79E', access:'#55544E',
+    dead:'#F07070', warn:'#E9A94A', warnF:'#3A2B0D', warnS:'#E0A33A',
+    pkt:'#F07070', pktOk:'#5DCAA5', hl:'#F07070' }
+};
+const FONT='-apple-system,Segoe UI,Roboto,Helvetica Neue,Arial,Noto Sans,sans-serif';
+const MONOF='ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+const W=900, H=560;
+let theme='light';
+// The dashboard passes its own theme in the query string; without this the
+// sandbox opens light while the rest of the page is dark. The toggle below
+// still overrides it, for this page only.
+try {
+  const q = new URLSearchParams(location.search).get('theme');
+  if (q === 'dark' || q === 'light') theme = q;
+  document.documentElement.dataset.theme = theme;
+} catch (e) {}
+
+function devStyle(d,T){
+  if (d.kind==='server') return { f:T.srvF, s:T.srvS, t:T.srvT };
+  if (d.kind==='router') return { f:T.rtrF, s:T.rtrS, t:T.rtrT };
+  if (d.kind==='switch') return { f:T.swF, s:T.swS, t:T.swT };
+  if (d.vlan>=60 && d.vlan!==90 && d.vlan!==10 && d.vlan!==20 && d.vlan!==30 && d.vlan!==40 && d.vlan!==50)
+    return { f:T.infraF, s:T.infraS, t:T.infraT };
+  return { f:T.hostF, s:T.hostS, t:T.hostT };
+}
+
+/* the point where a link enters this device, coming from another */
+function portPoint(d, fromX, fromY){
+  const dx = fromX - d.x, dy = fromY - d.y;
+  if (Math.abs(dx) < 1e-6) return { x:d.x, y:d.y + (dy>0? -1: 1) * d.h/2 };
+  const slope = dy/dx;
+  const hw = d.w/2, hh = d.h/2;
+  if (Math.abs(slope) <= hh/hw){
+    const sx = dx>0 ? -hw : hw;
+    return { x:d.x + sx, y:d.y + sx*slope };
+  }
+  const sy = dy>0 ? -hh : hh;
+  return { x:d.x + sy/slope, y:d.y + sy };
+}
+
+/* Is this router forwarding traffic?
+   With its uplink gone it can still be managed and still answers for
+   the virtual gateway, but it has no way out, so it may not be used
+   as a transit hop for anyone else. */
+function forwardsTraffic(id){
+  if (!devAlive(id)) return false;
+  if (id==='r1' || id==='r2'){
+    const st = devState(id);
+    if (st && st.kind==='uplink') return false;
+  }
+  return true;
+}
+
+/* Is this link usable at the physical layer (loop protection aside)?
+   - either end dead: no
+   - cut or flapping: no
+   - a forwarding link on a router that lost its uplink: no */
+function linkOk(l){
+  if (!devAlive(l.a) || !devAlive(l.b)) return false;
+  const st = linkState(l.a, l.b);
+  if (st && (st.kind==='down' || st.kind==='flap')) return false;
+  if (l.type==='primary' || l.type==='backup'){
+    if (!forwardsTraffic(l.a) || !forwardsTraffic(l.b)) return false;
+  }
+  return true;
+}
+
+/* Loop protection: a spare link is blocked only while its two ends are
+   ALREADY reachable through other links. When a primary branch fails
+   the ends separate and the spare opens - which is a spanning tree
+   converging. Blocking it outright would strand everything behind s1
+   the moment r1 died. */
+function stpBlocks(l){
+  if (!NET.stp || l.type !== 'backup') return false;
+  if (!linkOk(l)) return true;
+  const parent = {};
+  const find = x => parent[x] === x ? x : (parent[x] = find(parent[x]));
+  const uni = (a,b) => { const ra=find(a), rb=find(b); if (ra!==rb) parent[ra]=rb; };
+  for (const d of DEVS) parent[d.id] = d.id;
+  for (const o of LINKS){
+    if (o.type === 'backup') continue;
+    if (!linkOk(o)) continue;
+    uni(o.a, o.b);
+  }
+  return find(l.a) === find(l.b);
+}
+
+/* small badge on the device corner: 'x' = down, '!' = overloaded, 'z' = uplink lost */
+function badge(cx, cy, T, col, kind){
+  let g = `<circle cx="${cx}" cy="${cy}" r="6" fill="${col}"/>`;
+  if (kind==='x'){
+    g += `<path d="M${cx-2.3} ${cy-2.3} l4.6 4.6 M${cx+2.3} ${cy-2.3} l-4.6 4.6" `
+       + `stroke="${T.bg}" stroke-width="1.5" stroke-linecap="round"/>`;
+  } else if (kind==='!'){
+    g += `<path d="M${cx} ${cy-3} v3.6" stroke="${T.bg}" stroke-width="1.5" stroke-linecap="round"/>`
+       + `<circle cx="${cx}" cy="${cy+2.7}" r="0.9" fill="${T.bg}"/>`;
+  } else {
+    g += `<path d="M${cx-2.6} ${cy} h5.2" stroke="${T.bg}" stroke-width="1.5" stroke-linecap="round"/>`;
+  }
+  return g;
+}
+
+function render(){
+  const T = THEME[theme];
+  let s = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Simulation diagram">`;
+
+  /* links - faulty ones are drawn last so they stay on top */
+  const ordered = LINKS.slice().sort((a,b)=>{
+    const rank = l=>{
+      const st = linkState(l.a,l.b);
+      if (!devAlive(l.a) || !devAlive(l.b)) return 2;
+      if (st && st.kind==='down') return 2;
+      if (st && st.kind==='loss') return 1;
+      return 0;
+    };
+    return rank(a) - rank(b);
+  });
+  const breaks = [];
+  for (const l of ordered){
+    const A=DEV[l.a], B=DEV[l.b];
+    const st = linkState(l.a,l.b);
+    const gone = !devAlive(l.a) || !devAlive(l.b);
+    const ldown = gone || (st && st.kind==='down');
+    const lloss = !ldown && st && st.kind==='loss';
+    const stpBlk = stpBlocks(l);
+
+    let col = l.type==='primary'?T.primary:l.type==='backup'?T.backup:
+              l.type==='ospf'?T.ospf:l.type==='mgmt'?T.mgmt:T.access;
+    let dash = l.type==='backup' ? '6 4' : l.type==='ospf' ? '2 3' :
+               l.type==='mgmt' ? '7 3 2 3' : '';
+    let wd = l.type==='access'?1.1:1.4;
+    let op = 1;
+
+    if (ldown){ col = T.dead; dash = '3 4'; op = 0.8; wd = 1.4; }
+    else if (lloss){ col = T.warn; dash = '9 3 2 3'; wd = 1.7; }
+    else if (stpBlk){ dash = '4 5'; op = 0.45; }
+
+    const p1=portPoint(A,B.x,B.y), p2=portPoint(B,A.x,A.y);
+    s += `<path d="M${p1.x} ${p1.y} L${p2.x} ${p2.y}" stroke="${col}" stroke-width="${wd}" `
+       + (dash?`stroke-dasharray="${dash}" `:'')
+       + `fill="none" stroke-linecap="round" opacity="${op}"/>`;
+    if (ldown) breaks.push({ x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2, c:T.dead });
+    if (lloss) breaks.push({ x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2, c:T.warn, loss:true });
+  }
+  /* fault marker at the midpoint of a link */
+  for (const b of breaks){
+    if (b.loss){
+      s += `<circle cx="${b.x}" cy="${b.y}" r="6.5" fill="${T.bg}" stroke="${b.c}" stroke-width="1.1"/>`;
+      s += `<path d="M${b.x-2.6} ${b.y} h5.2" stroke="${b.c}" stroke-width="1.6" stroke-linecap="round"/>`;
+      s += `<path d="M${b.x} ${b.y-2.6} v2.2 M${b.x} ${b.y+0.4} v2.2" stroke="${b.c}" stroke-width="1.1" stroke-linecap="round" opacity="0.55"/>`;
+    } else {
+      s += `<circle cx="${b.x}" cy="${b.y}" r="6.5" fill="${T.bg}" stroke="${b.c}" stroke-width="1.2"/>`;
+      s += `<path d="M${b.x-2.8} ${b.y-2.8} l5.6 5.6 M${b.x+2.8} ${b.y-2.8} l-5.6 5.6" `
+         + `stroke="${b.c}" stroke-width="1.6" stroke-linecap="round"/>`;
+    }
+  }
+
+  /* devices */
+  for (const d of DEVS){
+    const st = devStyle(d,T);
+    const dst = devState(d.id);
+    const isRouter = d.id==='r1' || d.id==='r2';
+    /* devices */
+    const gone = (isRouter && !NET.up[d.id]) || (dst && dst.kind==='down');
+    /* degraded: uplink lost or overloaded */
+    const degraded = !gone && dst && (dst.kind==='uplink' || dst.kind==='overload');
+    const f = gone ? T.bg : st.f, sc = gone ? T.dead : st.s, tc = gone ? T.dead : st.t;
+    const x = d.x-d.w/2, y = d.y-d.h/2;
+    s += `<g class="dev" data-id="${d.id}" tabindex="0" role="button" aria-label="${esc(d.t1)}">`;
+    s += `<rect data-body x="${x}" y="${y}" width="${d.w}" height="${d.h}" rx="8" fill="${f}" `
+       + `stroke="${gone?T.dead:degraded?T.warn:sc}" stroke-width="${gone||degraded?1.5:0.9}"`
+       + (gone?` stroke-dasharray="4 3"`:``)+`/>`;
+    const two = !!d.t2 || d.kind==='host';
+    s += `<text x="${d.x}" y="${two? d.y-7 : d.y}" text-anchor="middle" dominant-baseline="central" `
+       + `font-family="${FONT}" font-size="${d.kind==='host'?11:12}" font-weight="600" fill="${tc}">${esc(d.t1)}</text>`;
+    let sub = '';
+    if (d.kind==='host'){
+      sub = gone ? 'disconnected' : (ipOf(d.id) || (d.dhcp ? 'no address yet' : ''));
+    } else if (d.kind==='router'){
+      if (!NET.up[d.id]) sub = 'disconnected';
+      else if (dst && dst.kind==='uplink') sub = 'uplink lost';
+      else if (dst && dst.kind==='overload') sub = 'overloaded';
+      else {
+        // count the virtual segments this box holds the gateway for
+        const held = Object.keys(VLANS).map(Number).filter(n=>n!==99 && vrrpOwner(n)===d.id).length;
+        sub = held ? `holds ${held} virtual gateway${held === 1 ? '' : 's'}` : 'standby only';
+      }
+    } else if (dst && dst.kind==='overload') sub = 'overloaded';
+    else sub = d.t2 || '';
+    if (sub){
+      s += `<text x="${d.x}" y="${d.y+9}" text-anchor="middle" dominant-baseline="central" `
+         + `font-family="${d.kind==='host'?MONOF:FONT}" font-size="${d.kind==='host'?9.5:10}" `
+         + `fill="${tc}" opacity="0.85">${esc(sub)}</text>`;
+    }
+    s += `</g>`;
+    /* fault badge, placed on the top-right corner */
+    if (gone){
+      s += badge(d.x+d.w/2-3, d.y-d.h/2+3, T, T.dead, 'x');
+    } else if (degraded){
+      s += badge(d.x+d.w/2-3, d.y-d.h/2+3, T, T.warn, dst.kind==='overload' ? '!' : 'z');
+    }
+  }
+
+  /* packet layer */
+  s += `<g id="pkts"></g>`;
+  s += `</svg>`;
+  document.querySelector('[data-svg]').innerHTML = s;
+
+  document.getElementById('hud-inflight').textContent = NET.inflight;
+  document.getElementById('hud-sent').textContent = NET.sent;
+  document.getElementById('hud-ok').textContent = NET.ok;
+  document.getElementById('hud-drop').textContent = NET.drop;
+
+  renderArp(); renderVrrp();
+}
+
+/* side tables */
+function renderArp(){
+  const rows = [];
+  for (const [dev, tbl] of Object.entries(NET.arp)){
+    for (const [ip, e] of Object.entries(tbl)){
+      rows.push({ dev, ip, mac:e.mac, port:e.port });
+    }
+  }
+  rows.sort((a,b)=> a.dev.localeCompare(b.dev) || a.ip.localeCompare(b.ip));
+  const body = document.querySelector('#arp tbody');
+  document.getElementById('arp-count').textContent = rows.length + ' entries';
+  body.innerHTML = rows.length
+    ? rows.map(r=>`<tr><td>${esc(r.dev)}</td><td class="mono">${esc(r.ip)}</td>`
+        + `<td class="mono">${esc(r.mac)}</td><td style="color:var(--muted)">${esc(r.port)}</td></tr>`).join('')
+    : `<tr><td colspan="4" class="empty">No entries yet. The table fills up as packets are sent.</td></tr>`;
+}
+function renderVrrp(){
+  const rows = [];
+  for (const v of Object.keys(VLANS).map(Number).filter(n=>n!==99).sort((a,b)=>a-b)){
+    const owner = vrrpOwner(v);
+    rows.push({ v, owner });
+  }
+  document.getElementById('vrrp-count').textContent = rows.length + ' groups';
+  document.querySelector('#vrrp tbody').innerHTML = rows.map(r=>{
+    const alive = r.owner ? `<span class="pill up">${r.owner}</span>` : `<span class="pill dn">none</span>`;
+    const pr = r.owner ? DEV[r.owner].prio : '—';
+    return `<tr><td>${VLANS[r.v].name}</td><td>${alive}</td><td class="mono">${pr}</td>`
+         + `<td class="mono" style="color:var(--muted)">${esc(VLANS[r.v].vip)}</td></tr>`;
+  }).join('');
+}
+</script>
+<script>
+/* PART 4 - PACKET ENGINE */
+const SPEED = { v: 1 };
+const sleep = (ms)=> new Promise(r=>setTimeout(r, ms/SPEED.v));
+
+/* Animate one packet from A to B, then remove it.
+   requestAnimationFrame keeps it smooth, but there is always a
+   fallback timer: when the tab is hidden rAF stops, and without the
+   fallback the packet would hang mid-flight and the whole simulation
+   would freeze with it. */
+function animatePacket(fromId, toId, opts={}){
+  return new Promise(res=>{
+    const A = DEV[fromId], B = DEV[toId];
+    if (!A || !B){ res(); return; }
+    const p1 = portPoint(A,B.x,B.y), p2 = portPoint(B,A.x,A.y);
+    const layer = document.getElementById('pkts');
+    if (!layer){ res(); return; }
+    const T = THEME[theme];
+    const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+    const c = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('r', opts.size||4.5);
+    c.setAttribute('fill', opts.color || T.pkt);
+    c.setAttribute('cx', p1.x); c.setAttribute('cy', p1.y);
+    const lab = document.createElementNS('http://www.w3.org/2000/svg','text');
+    lab.setAttribute('font-family', MONOF); lab.setAttribute('font-size','9');
+    lab.setAttribute('fill', opts.color || T.pkt); lab.setAttribute('text-anchor','middle');
+    lab.setAttribute('x', (p1.x+p2.x)/2); lab.setAttribute('y', (p1.y+p2.y)/2 - 8);
+    lab.textContent = opts.label || '';
+    g.appendChild(c); if (opts.label) g.appendChild(lab);
+    layer.appendChild(g);
+
+    const dur = Math.max(16, (opts.dur ?? 320) / SPEED.v);
+    const t0 = performance.now();
+    let done = false;
+
+    const place = (k)=>{
+      const e = k<0.5 ? 2*k*k : 1-Math.pow(-2*k+2,2)/2;   // easeInOut
+      c.setAttribute('cx', p1.x + (p2.x-p1.x)*e);
+      c.setAttribute('cy', p1.y + (p2.y-p1.y)*e);
+      if (opts.label){
+        lab.setAttribute('x', p1.x + (p2.x-p1.x)*e);
+        lab.setAttribute('y', p1.y + (p2.y-p1.y)*e - 9);
+      }
+    };
+    const finish = ()=>{
+      if (done) return;
+      done = true;
+      clearTimeout(watchdog);
+      try { g.remove(); } catch(e){}
+      res();
+    };
+    /* fallback timer: it always finishes, even when no frame is drawn.
+       The wait has to scale with the speed setting, otherwise raising
+       the speed changes nothing because every packet still waits out
+       the full delay. */
+    const watchdog = setTimeout(()=>{ place(1); finish(); }, dur + Math.min(220, Math.max(30, dur * 0.5)));
+
+    const tick = (now)=>{
+      if (done) return;
+      const k = Math.min(1, (now - t0) / dur);
+      place(k);
+      if (k < 1) requestAnimationFrame(tick);
+      else finish();
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+/* devices */
+function learn(devId, ip, mac, port){
+  (NET.arp[devId] ||= {})[ip] = { mac, port, ts: Date.now() };
+}
+
+/* devices */
+function resolveOnSegment(fromId, targetIp, vlan){
+  // which device shares this virtual segment and owns that address?
+  for (const d of DEVS){
+    if (d.id === fromId) continue;
+    if (d.vlan === vlan && ipOf(d.id) === targetIp) return d.id;
+    if (d.id === 'r1' || d.id === 'r2'){
+      const p = DEV[d.id].ports[portNameFor(vlan)];
+      if (p && p.ip === targetIp && NET.up[d.id]) return d.id;
+    }
+  }
+  return null;
+}
+
+/* devices */
+function switchFor(hostId){
+  const l = LINKS.find(x => x.type==='access' && (x.a===hostId || x.b===hostId));
+  if (!l) return null;
+  return l.a===hostId ? l.b : l.a;
+}
+
+/* devices */
+function activeLinks(){
+  return LINKS.filter(l=>{
+    if (!linkOk(l)) return false;
+    if (stpBlocks(l)) return false;                        // blocked by loop protection
+    return true;
+  });
+}
+
+function hops(aId, bId){
+  if (aId === bId) return [];
+  const links = activeLinks();
+  const adj = {};
+  const add = (u,v,w)=>{
+    (adj[u] ||= []).push({ n:v, w });
+    (adj[v] ||= []).push({ n:u, w });
+  };
+  for (const l of links){
+    // prefer the primary path, then management, then the spare
+    let w = l.type==='primary' ? 1 : l.type==='access' ? 1 : l.type==='mgmt' ? 1
+          : l.type==='ospf' ? 2 : l.type==='backup' ? 6 : 3;
+    let st = linkState(l.a, l.b);
+    if (st && st.kind==='loss') w += 20;   // degraded: avoided when there is a choice
+    add(l.a, l.b, w);
+  }
+  // small Dijkstra (a few dozen edges; no priority queue needed)
+  const dist = {}, prev = {}, seen = {};
+  dist[aId] = 0;
+  while (true){
+    let u = null, best = Infinity;
+    for (const k in dist){
+      if (!seen[k] && dist[k] < best){ best = dist[k]; u = k; }
+    }
+    if (u === null) break;
+    if (u === bId) break;
+    seen[u] = true;
+    for (const e of (adj[u] || [])){
+      const nd = dist[u] + e.w;
+      if (nd < (dist[e.n] ?? Infinity)){ dist[e.n] = nd; prev[e.n] = u; }
+    }
+  }
+  if (dist[bId] === undefined) return [];
+  const path = [];
+  let cur = bId;
+  while (cur !== aId){ path.unshift(cur); cur = prev[cur]; if (cur===undefined) return []; }
+  return path;
+}
+
+async function walkPacket(fromId, toId, opts={}){
+  NET.inflight++;
+  const chain = hops(fromId, toId);
+  let cur = fromId;
+  for (const nxt of chain){
+    await animatePacket(cur, nxt, opts);
+    cur = nxt;
+  }
+  NET.inflight--;
+  return cur;
+}
+
+/* Address assignment (four steps) */
+const DHCP_RANGE = { start:100, end:200 };
+const DHCP_LEASE = new Map();   // vlan -> Set ip
+/* devices */
+function dhcpFree(vlan){
+  if (NET.dhcpFull.has(vlan)) return 0;
+  const used = DHCP_LEASE.get(vlan) || new Set();
+  return Math.max(0, (DHCP_RANGE.end - DHCP_RANGE.start + 1) - used.size);
+}
+function leaseFrom(vlan, devId){
+  if (NET.dhcpFull.has(vlan)) return null;
+  const used = DHCP_LEASE.get(vlan) || new Set();
+  const taken = new Set([...used].map(ip=>ip));
+  for (let n=DHCP_RANGE.start; n<=DHCP_RANGE.end; n++){
+    const ip = VLANS[vlan].net + '.' + n;
+    if (!taken.has(ip)){ used.add(ip); DHCP_LEASE.set(vlan, used); return ip; }
+  }
+  return null;
+}
+function releaseLease(vlan, ip){
+  const s = DHCP_LEASE.get(vlan);
+  if (s) s.delete(ip);
+}
+
+async function dhcpFor(devId){
+  const d = DEV[devId];
+  const vlan = d.vlan;
+  const owner = vrrpOwner(vlan);
+  if (!owner){ log('drop', `No DHCP server for ${VLANS[vlan].name}: both routers are disconnected`); return null; }
+
+  const path = hops(devId, owner);          // the real cable path
+  const ip = leaseFrom(vlan, devId);
+  if (!ip){ log('drop','Address pool exhausted'); return null; }
+
+  const stages = [
+    ['who-has',     '#BA7517', `broadcast who-has (step 1/4)`,        devId, owner, 260],
+    ['hello',    '#1D9E75', `hello ${ip} to ${d.t1} (step 2/4)`,  owner, devId, 260],
+    ['request', '#BA7517', `request ${ip} (step 3/4)`,           devId, owner, 240],
+    ['ack','#1D9E75', `ack ${ip} (step 4/4)`,          owner, devId, 240]
+  ];
+
+  for (const [label, color, msg, from, to, dur] of stages){
+    log('dhcp', `${from===devId ? d.t1 : owner}: ${msg}`);
+    // walk the cable path hop by hop
+    let cur = from;
+    for (const nxt of (from===devId ? path : [...path].reverse())){
+      await animatePacket(cur, nxt, { color, label, size:3.5, dur });
+      cur = nxt;
+    }
+    if (label === 'request'){ NET.dhcp.set(devId, ip); }
+  }
+
+  learn(owner, ip, macFor(devId), portNameFor(vlan));
+  learn(devId, VLANS[vlan].vip, macFor(owner), 'eth0');
+  render();
+  return ip;
+}
+
+/* devices */
+
+/* drop probability when crossing a degraded link */
+const LOSS_P = 0.45;
+/* devices */
+const OVERLOAD_P = 0.55;
+
+/* Can this hop drop the packet? Returns the reason when it can. */
+function hopFault(fromId, toId){
+  // overloaded device: it cannot keep up itself
+  for (const id of [fromId, toId]){
+    const st = devState(id);
+    if (st && st.kind==='overload' && Math.random() < OVERLOAD_P){
+      return `${DEV[id].t1} overloaded, dropped while forwarding`;
+    }
+  }
+  // degraded link: dropped in transit
+  const st = linkState(fromId, toId);
+  if (st && st.kind==='loss' && Math.random() < LOSS_P){
+    return `Link ${fromId}–${toId} degraded, packet lost`;
+  }
+  return null;
+}
+
+/* devices */
+function deviceFault(id){
+  const st = devState(id);
+  if (st && st.kind==='overload' && Math.random() < OVERLOAD_P){
+    return `${DEV[id].t1} overloaded, cannot accept the packet`;
+  }
+  return null;
+}
+
+/* Walk hop by hop, stopping with an error if the packet is dropped.
+   Returns true when it arrives. */
+async function traverse(fromId, toId, opts={}){
+  // sending into the source can fail too if it is overloaded
+  const chain = hops(fromId, toId);
+  if (!chain.length){
+    NET.drop++;
+    log('drop', `No path from ${DEV[fromId].t1} to ${DEV[toId].t1}`);
+    render();
+    return false;
+  }
+  let cur = fromId;
+  for (const nxt of chain){
+    const fault = hopFault(cur, nxt);
+    if (fault){
+      await walkPacket(cur, nxt, { ...opts, color:'#C0392B', label:'lost', size:4 });
+      NET.drop++;
+      log('drop', fault);
+      render();
+      return false;
+    }
+    await animatePacket(cur, nxt, opts);
+    cur = nxt;
+  }
+  return true;
+}
+
+async function sendPacket(srcId, dstId){
+  const src = DEV[srcId], dst = DEV[dstId];
+  if (!src || !dst) return;
+  if (srcId === dstId){ NET.drop++; log('drop','Source and destination are the same'); render(); return; }
+
+  NET.sent++;
+
+  // 0. is the end device alive?
+  if (!devAlive(srcId)){
+    NET.drop++;
+    log('drop', `${src.t1} is down, cannot send`);
+    render(); return;
+  }
+
+  // 1. make sure it has an address
+  if (src.dhcp && !NET.dhcp.has(srcId)) await dhcpFor(srcId);
+  if (dst.dhcp && !NET.dhcp.has(dstId)) await dhcpFor(dstId);
+  const sip = ipOf(srcId), dip = ipOf(dstId);
+  if (!sip || !dip){
+    NET.drop++;
+    const why = (src.dhcp && !NET.dhcp.has(srcId)) || (dst.dhcp && !NET.dhcp.has(dstId))
+      ? 'no address (pool exhausted)'
+      : 'no address';
+    log('drop', `Cannot send: ${why}`);
+    render(); return;
+  }
+
+  const svlan = vlanOf(srcId), dvlan = vlanOf(dstId);
+  log('icmp', `${src.t1} → ${dst.t1}: ${sip} → ${dip}`);
+
+  // 2. same virtual segment: straight across the broadcast domain
+  if (svlan === dvlan){
+    log('arp', `${src.t1}: resolving ${dip} in ${VLANS[svlan].name}`);
+    if (!await traverse(srcId, dstId, { color:'#378ADD', label:'address request', size:3.5, dur:260 })) return;
+    learn(srcId, dip, macFor(dstId), 'eth0');
+    learn(dstId, sip, macFor(srcId), 'eth0');
+    const df = deviceFault(dstId);
+    if (df){ NET.drop++; log('drop', df); render(); return; }
+    if (!await traverse(srcId, dstId, { color:'#1D9E75', size:4.5, label:'data' })) return;
+    NET.ok++;
+    log('icmp', `Delivered: same segment ${VLANS[svlan].name}, no routing needed`);
+    render(); return;
+  }
+
+  // 3. different segment: needs the virtual gateway
+  const gateway = VLANS[svlan].vip;
+  const owner = vrrpOwner(svlan);
+  if (!owner){
+    NET.drop++;
+    log('drop', `No virtual gateway for ${VLANS[svlan].name}: neither router is usable`);
+    render(); return;
+  }
+
+  // split: equal priority, both claim master -> inconsistent physical address
+  if (vrrpSplit(svlan)){
+    await walkPacket(srcId, owner, { color:'#C0392B', label:'gateway request', size:3.5, dur:300 });
+    NET.drop++;
+    log('drop', `Virtual gateway split ${gateway}: r1 and r2 share a priority, so each answers with a different physical address`);
+    render(); return;
+  }
+
+  log('arp', `${src.t1}: resolving virtual gateway ${gateway}`);
+  if (!await traverse(srcId, owner, { color:'#378ADD', label:'gateway request', size:3.5, dur:280 })) return;
+  learn(srcId, gateway, macFor(owner), 'eth0');
+  log('vrrp', `Virtual gateway ${gateway} held by ${owner} (priority ${DEV[owner].prio})`);
+
+  if (!await traverse(srcId, owner, { color:'#378ADD', size:4, label:'data' })) return;
+
+  // 4. the router looks up its table and forwards to the destination segment
+  const route = routeLookup(owner, dip);
+  if (!route){
+    NET.drop++;
+    log('drop', `${owner}: no route to ${dip}`);
+    render(); return;
+  }
+  log('sys', `${owner}: ${dip} is in ${VLANS[route.vlan].name}, out via port ${route.port}`);
+
+  if (!await traverse(owner, dstId, { color:'#1D9E75', size:4.5, label:'data' })) return;
+  const df = deviceFault(dstId);
+  if (df){ NET.drop++; log('drop', df); render(); return; }
+  NET.ok++;
+  log('icmp', `Delivered: ${dst.t1} received via ${owner}`);
+  render();
+}
+</script>
+<script>
+/* PART 5 - UI CONTROL */
+function fillSelects(){
+  const hosts = DEVS.filter(d=>d.kind==='host' || d.id==='ctl');
+  const opts = hosts.map(d=>`<option value="${d.id}">${esc(d.t1)}</option>`).join('');
+  document.getElementById('src').innerHTML = opts;
+  document.getElementById('dst').innerHTML = opts;
+  document.getElementById('src').value = 'pc10';
+  document.getElementById('dst').value = 'srv';
+}
+
+const tip = document.getElementById('tip');
+document.addEventListener('mousemove', e=>{
+  const g = e.target.closest && e.target.closest('g.dev');
+  if (!g){ tip.classList.remove('on'); return; }
+  const d = DEV[g.dataset.id];
+  if (!d){ tip.classList.remove('on'); return; }
+  let detail = '';
+  if (d.kind==='host'){
+    detail = `Segment: ${VLANS[d.vlan]?.name||'—'} · Address: ${ipOf(d.id)||'unassigned'}`;
+  } else if (d.kind==='router'){
+    detail = NET.up[d.id] ? `Up · priority ${d.prio} · ${d.ports?'11 ports':'—'}` : 'Disconnected';
+  } else if (d.kind==='switch'){
+    detail = '802.1Q trunk, loop protection' + (NET.stp?' on':' off');
+  } else detail = 'Management and monitoring';
+  tip.innerHTML = `<b>${esc(d.t1)}</b><span class="d">${esc(detail)}</span>`;
+  tip.classList.add('on');
+  const pad=14, r=tip.getBoundingClientRect();
+  let x=e.clientX+pad, y=e.clientY+pad;
+  if (x+r.width>innerWidth-8) x=e.clientX-r.width-pad;
+  if (y+r.height>innerHeight-8) y=e.clientY-r.height-pad;
+  tip.style.left=Math.max(8,x)+'px'; tip.style.top=Math.max(8,y)+'px';
+});
+
+document.addEventListener('click', e=>{
+  const g = e.target.closest && e.target.closest('g.dev');
+  if (!g) return;
+  const id = g.dataset.id;
+  const d = DEV[id];
+  if (d.kind==='host' || id==='ctl'){
+    const sel = document.getElementById('src');
+    sel.value = id;
+    log('sys', `Selected ${d.t1} as source`);
+  } else if (id==='r1' || id==='r2'){
+    toggleRouter(id);
+  } else {
+    log('stp', `${d.t1}: ${NET.stp?'loop protection on':'loop protection off'}`);
+  }
+});
+
+function toggleRouter(id){
+  NET.up[id] = !NET.up[id];
+  if (NET.up[id]) log('vrrp', `${id} is back up (priority ${DEV[id].prio})`);
+  else log('drop', `${id} disconnected`);
+  // announce gateway transitions
+  for (const v of Object.keys(VLANS).map(Number).filter(n=>n!==99)){
+    const o = vrrpOwner(v);
+    if (!o) log('drop', `${VLANS[v].name}: lost virtual gateway ${VLANS[v].vip}`);
+  }
+  render();
+}
+
+document.getElementById('btn-send').addEventListener('click', async ()=>{
+  const b = document.getElementById('btn-send');
+  if (b.disabled) return;
+  b.disabled = true;
+  const s = document.getElementById('src').value, t = document.getElementById('dst').value;
+  try { await sendPacket(s,t); } catch(err){ log('drop','Error: '+err.message); }
+  b.disabled = false;
+});
+
+document.getElementById('btn-kill1').addEventListener('click', ()=>toggleRouter('r1'));
+document.getElementById('btn-kill2').addEventListener('click', ()=>toggleRouter('r2'));
+
+/* devices */
+const FAULTS = [
+  { id:'link-core',  group:'Cable cut',        label:'Cable cut r1 - Switch 2', hint:'one of two uplinks lost',
+    on:()=>{ NET.fl[lk('r1','s2')] = { kind:'down' }; },
+    off:()=>{ delete NET.fl[lk('r1','s2')]; },
+    active:()=> linkState('r1','s2')?.kind==='down',
+    note:'s2 loses one uplink. Traffic moves to r2.' },
+  { id:'link-acc',   group:'Cable cut',        label:'Cable cut Switch 1 - Accounting PC', hint:'host disconnected',
+    on:()=>{ NET.fl[lk('s1','pc10')] = { kind:'down' }; },
+    off:()=>{ delete NET.fl[lk('s1','pc10')]; },
+    active:()=> linkState('s1','pc10')?.kind==='down',
+    note:'Accounting PC loses its only path; there is no redundancy at the access layer.' },
+  { id:'link-mgmt',  group:'Cable cut',        label:'Management cable to r2 cut', hint:'r2 unmonitored',
+    on:()=>{ NET.fl[lk('ctl','r2')] = { kind:'down' }; },
+    off:()=>{ delete NET.fl[lk('ctl','r2')]; },
+    active:()=> linkState('ctl','r2')?.kind==='down',
+    note:'r2 still forwards traffic but has no path back to the controller.' },
+
+  { id:'loss-core',  group:'Suy hao',        label:'Loss r1 - Switch 1', hint:'packet loss, path remains',
+    on:()=>{ NET.fl[lk('r1','s1')] = { kind:'loss' }; },
+    off:()=>{ delete NET.fl[lk('r1','s1')]; },
+    active:()=> linkState('r1','s1')?.kind==='loss', warn:true,
+    note:'The link is up but drops packets. Routing avoids it when another path exists.' },
+  { id:'loss-acc',   group:'Suy hao',        label:'Loss Switch 3 - Access point', hint:'wireless flapping',
+    on:()=>{ NET.fl[lk('s3','ap')] = { kind:'loss' }; },
+    off:()=>{ delete NET.fl[lk('s3','ap')]; },
+    active:()=> linkState('s3','ap')?.kind==='loss', warn:true,
+    note:'The access point has only one path, so packets drop where they stand.' },
+
+  { id:'down-sw2',   group:'Device down',  label:'Switch 2 down', hint:'a whole branch lost',
+    on:()=>{ NET.fd['s2'] = { kind:'down' }; },
+    off:()=>{ delete NET.fd['s2']; },
+    active:()=> devState('s2')?.kind==='down',
+    note:'Sales PC and the internal server are cut off completely.' },
+  { id:'down-srv',   group:'Device down',  label:'Internal server down', hint:'destination not responding',
+    on:()=>{ NET.fd['srv'] = { kind:'down' }; },
+    off:()=>{ delete NET.fd['srv']; },
+    active:()=> devState('srv')?.kind==='down',
+    note:'Packets still arrive but the server never answers, so they count as dropped.' },
+
+  { id:'ul-r1',      group:'Virtual gateway',        label:'r1 loses its uplink', hint:'the virtual gateway has to move',
+    on:()=>{ NET.fd['r1'] = { kind:'uplink' }; },
+    off:()=>{ delete NET.fd['r1']; },
+    active:()=> devState('r1')?.kind==='uplink', warn:true,
+    note:'r1 is alive but has no way out, so it may not hold the virtual gateway any more.' },
+  { id:'tie',        group:'Virtual gateway',        label:'Both sides equal priority', hint:'virtual gateway split',
+    on:()=>{ NET.vrrpTie = true; },
+    off:()=>{ NET.vrrpTie = false; },
+    active:()=> NET.vrrpTie,
+    note:'Neither side is preferred now and both claim to be master: the physical address is inconsistent.' },
+
+  { id:'over-r2',    group:'Overload',        label:'r2 overloaded', hint:'slow, dropping packets',
+    on:()=>{ NET.fd['r2'] = { kind:'overload' }; },
+    off:()=>{ delete NET.fd['r2']; },
+    active:()=> devState('r2')?.kind==='overload', warn:true,
+    note:'r2 keeps the virtual gateway but cannot keep up, so packets drop at random.' },
+  { id:'over-sw3',   group:'Overload',        label:'Switch 3 overloaded', hint:'camera and wireless branch',
+    on:()=>{ NET.fd['s3'] = { kind:'overload' }; },
+    off:()=>{ delete NET.fd['s3']; },
+    active:()=> devState('s3')?.kind==='overload', warn:true,
+    note:'The s3 trunk is congested, so everything behind it is affected.' },
+
+  { id:'dhcp-full',  group:'Misconfiguration',   label:'Address pool exhausted', hint:'the Accounting scope is out of addresses',
+    on:()=>{ NET.dhcpFull.add(10); },
+    off:()=>{ NET.dhcpFull.delete(10); },
+    active:()=> NET.dhcpFull.has(10),
+    note:'No addresses left for a new host on the Accounting segment.' },
+  { id:'stp-off',    group:'Misconfiguration',   label:'Loop protection off', hint:'risk of a broadcast storm',
+    on:()=>{ setSTP(false); },
+    off:()=>{ setSTP(true); },
+    active:()=> !NET.stp,
+    note:'Both parallel paths are active, so broadcast frames can loop.' }
+];
+
+function setSTP(on){
+  NET.stp = on;
+  const b = document.getElementById('btn-stp');
+  b.setAttribute('aria-pressed', String(on));
+  b.textContent = on ? 'Loop protection: on' : 'Loop protection: off';
+}
+
+function faultById(id){ return FAULTS.find(f=>f.id===id); }
+
+function toggleFault(id){
+  const f = faultById(id);
+  if (!f) return;
+  const was = f.active();
+  if (was) f.off(); else f.on();
+  log('sys', `${f.label}: ${was ? 'restore' : 'faults active'} — ${f.note}`);
+  renderFaults();
+  render();
+}
+
+function renderFaults(){
+  const grid = document.getElementById('fault-grid');
+  if (!grid) return;
+  const on = FAULTS.filter(f=>f.active());
+  grid.innerHTML = FAULTS.map(f=>{
+    const active = f.active();
+    const cls = 'fault' + (active ? (f.warn?' warnon':' on') : '');
+    return `<button class="${cls}" data-fault="${f.id}" aria-pressed="${active}">`
+         + `<span class="dot"></span>`
+         + `<span class="lbl"><b>${esc(f.label)}</b><span>${esc(f.group)} · ${esc(active ? 'on' : f.hint)}</span></span>`
+         + `</button>`;
+  }).join('');
+  const sum = document.getElementById('fault-summary');
+  if (sum) sum.textContent = on.length
+    ? `${on.length} fault${on.length === 1 ? '' : 's'} active`
+    : 'no faults';
+}
+
+document.getElementById('fault-grid').addEventListener('click', e=>{
+  const b = e.target.closest('button[data-fault]');
+  if (!b) return;
+  toggleFault(b.dataset.fault);
+});
+
+document.getElementById('btn-clear-faults').addEventListener('click', ()=>{
+  FAULTS.forEach(f=>{ if (f.active()) f.off(); });
+  NET.stp = true;
+  renderFaults();
+  render();
+  log('sys','All faults cleared, back to normal');
+});
+
+document.getElementById('btn-stp').addEventListener('click', ()=>{
+  const next = !NET.stp;
+  setSTP(next);
+  if (next){
+    log('stp','Loop protection on: the spare path goes to standby');
+  } else {
+    log('stp','Loop protection off: both paths are active, broadcast storm risk');
+  }
+  renderFaults();
+});
+
+document.getElementById('speed').addEventListener('click', e=>{
+  const b = e.target.closest('button'); if (!b) return;
+  SPEED.v = Number(b.dataset.sp);
+  document.querySelectorAll('#speed button').forEach(x=>x.setAttribute('aria-pressed', String(x===b)));
+});
+
+const btnTheme = document.getElementById('btn-theme');
+btnTheme.addEventListener('click', ()=>{
+  theme = theme==='dark'?'light':'dark';
+  document.documentElement.dataset.theme = theme;
+  btnTheme.textContent = theme==='dark' ? 'Light mode' : 'Dark mode';
+  btnTheme.setAttribute('aria-pressed', String(theme==='dark'));
+  render();
+});
+
+document.getElementById('btn-reset').addEventListener('click', ()=>{
+  NET.up.r1 = true; NET.up.r2 = true; NET.stp = true;
+  NET.fl = {}; NET.fd = {}; NET.dhcpFull.clear(); NET.vrrpTie = false;
+  NET.arp = {}; NET.dhcp.clear(); DHCP_LEASE.clear();
+  NET.sent = NET.ok = NET.drop = 0; NET.inflight = 0;
+  LOG.length = 0;
+  setSTP(true);
+  renderFaults();
+  render();
+  log('sys','Simulation reset');
+});
+
+/* bootstrap */
+fillSelects();
+btnTheme.textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
+btnTheme.setAttribute('aria-pressed', String(theme === 'dark'));
+NET.stp = true;          // on by default, as designed
+setSTP(true);
+renderFaults();
+render();
+log('sys','Simulation ready. Hosts have no address yet; the first packet triggers DHCP.');
+</script>
+</body>
+</html>
