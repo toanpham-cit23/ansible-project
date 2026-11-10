@@ -49,7 +49,19 @@ Thumbs.db
 files/*
 !files/dashboard/
 
+# --- source trees that must be committed ---
+# files/* is a broad guard against vendor payloads; these directories are our
+# own source and are explicitly re-included. The DuckDNS env file is re-excluded
+# below even though *.env already covers it, so the intent cannot be lost if
+# someone reorders the file.
+!files/ops/
+!files/lab/
+!files/sim/
+files/ops/duckdns.env
+files/lab/*.db
+
 # --- runtime noise ---
+.commit-msg
 __pycache__/
 *.pyc
 dashboard.tar.gz
@@ -57,3 +69,43 @@ dash-ansible.tar.gz
 
 # Local backup copies kept outside the tracked tree
 .local-backups/
+
+# --- generated operational state (never source) ---
+files/dashboard/db/certs/
+files/dashboard/db/ops/
+files/dashboard/db/outbox/
+files/dashboard/db/*.json
+
+# --- Telegram / alert secrets (runbook 4.5) ---
+# The bot token is either TELEGRAM_BOT_TOKEN in an untracked .env, or an
+# AES-GCM ciphertext inside net.db. Neither form belongs in git.
+telegram.env
+files/dashboard/db/telegram.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+secrets/
+credentials*.json
+service-account*.json
+*_token.txt
+*.pem.bak
+
+# --- logs, temp files and editor scratch ---
+*.log
+*.log.*
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+*.swo
+*~
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- generated reports are delivered from Downloads, not committed ---
+*.docx
+*.pdf.report
+

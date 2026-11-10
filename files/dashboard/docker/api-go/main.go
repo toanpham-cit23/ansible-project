@@ -380,7 +380,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: "sess", Value: jwtSign(id, jti), Path: "/", MaxAge: tokenTTL,
-		HttpOnly: true, Secure: cookieSecure, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: cookieSecure || r.TLS != nil, SameSite: http.SameSiteStrictMode,
 	})
 	var role, name string
 	_ = db.QueryRow("SELECT username, role FROM users WHERE id = ?", id).Scan(&name, &role)
@@ -1009,8 +1009,15 @@ func logEvent(deviceID int64, severity, message string) {
 	if isBlocked(sig) {
 		return
 	}
+	// The column is a foreign key to devices with enforcement on, so an event
+	// that belongs to no device - a login failure, a terminated connection -
+	// has to be NULL. Passing 0 made the insert fail and the event vanish.
+	var dev any
+	if deviceID > 0 {
+		dev = deviceID
+	}
 	_, _ = db.Exec("INSERT INTO events(device_id, severity, message, sig) VALUES (?,?,?,?)",
-		deviceID, severity, message, sig)
+		dev, severity, message, sig)
 }
 
 func levelOf(sev string) string {
@@ -1169,6 +1176,8 @@ func main() {
 	defer db.Close()
 	ensureLogSchema()
 	ensureLabSchema()
+	ensureTelegramSchema() // adds shift_admins.telegram + the Telegram ledger tables
+	ensureDiscoverySchema() // B.9 new-device ledger, fed from the poller's ip_leases
 	bootstrap()
 
 	mux := http.NewServeMux()
@@ -1197,6 +1206,11 @@ func main() {
 	// ---- operations layer (lab.go)
 	mux.HandleFunc("GET /api/leases", withUser(handleLeases))
 	mux.HandleFunc("PATCH /api/leases/{id}", withAdmin(handlePatchLease))
+	// Terminating a connection is an operational action, so it is recorded in
+	// the lease history and filed as an event rather than silently flipping a
+	// flag: whoever picks up the next shift has to be able to see who cut what.
+	mux.HandleFunc("POST /api/leases/{id}/terminate", withAdmin(handleTerminateLease))
+	mux.HandleFunc("POST /api/leases/{id}/restore", withAdmin(handleRestoreLease))
 	mux.HandleFunc("GET /api/lease-events", withUser(handleLeaseEvents))
 	mux.HandleFunc("GET /api/reboots", withUser(handleReboots))
 	mux.HandleFunc("GET /api/reachability", withUser(handleReachability))
@@ -1227,6 +1241,33 @@ func main() {
 	mux.HandleFunc("PUT /api/dns", withAdmin(handlePutDNS))
 	mux.HandleFunc("DELETE /api/dns/{id}", withAdmin(handleDeleteDNS))
 
+	// Operational surface. The controller does the work over SSH; these routes
+	// only read its status files and leave request markers for a host cron job.
+	mux.HandleFunc("GET /api/ops", withUser(handleOps))
+	mux.HandleFunc("GET /api/ops/telemetry", withUser(handleOpsTelemetry))
+	mux.HandleFunc("GET /api/ops/activity", withUser(handleOpsActivity))
+	mux.HandleFunc("GET /api/ops/gaps", withUser(handleOpsGaps))
+	mux.HandleFunc("POST /api/ops/snapshot", withAdmin(handleOpsSnapshot))
+	mux.HandleFunc("POST /api/ops/retention", withAdmin(handleOpsRetention))
+
+	// ---- B.9 new device discovery (poller ARP data -> ledger)
+	mux.HandleFunc("GET /api/discovery", withUser(handleDiscovery))
+	mux.HandleFunc("POST /api/discovery/action", withAdmin(handleDiscoveryAction))
+
+	// ---- Telegram incident alerts. Reads are for any signed-in user; every
+	// write is admin-only. The frontend hides the controls too, but this is the
+	// real boundary (defense in depth, runbook 4.1c).
+	mux.HandleFunc("GET /api/telegram/status", withUser(handleTelegramStatus))
+	mux.HandleFunc("GET /api/telegram/followers", withUser(handleTelegramFollowers))
+	mux.HandleFunc("GET /api/telegram/incidents", withUser(handleTelegramIncidents))
+	mux.HandleFunc("GET /api/telegram/deliveries", withUser(handleTelegramDeliveries))
+	mux.HandleFunc("PUT /api/telegram/config", withAdmin(handleTelegramConfig))
+	mux.HandleFunc("POST /api/telegram/auth", withUser(handleTelegramAuth))
+	mux.HandleFunc("POST /api/telegram/link-token", withUser(handleTelegramLinkToken))
+	mux.HandleFunc("POST /api/telegram/test", withAdmin(handleTelegramTest))
+	mux.HandleFunc("POST /api/telegram/alert", withAdmin(handleTelegramAlert))
+	mux.HandleFunc("POST /api/telegram/incident", withAdmin(handleTelegramIncident))
+
 	noStore := func(p string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store, max-age=0")
@@ -1237,15 +1278,49 @@ func main() {
 	mux.HandleFunc("GET /app", noStore("app.html"))
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 
+	// One handler for both listeners. HSTS is only emitted for requests that
+	// actually arrived over TLS - sending it on plain HTTP would be ignored by
+	// browsers but would look like a promise the :8080 listener cannot keep.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		mux.ServeHTTP(w, r)
+	})
 	srv := &http.Server{
 		Addr:              ":8000",
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
+	}
+	// A trusted certificate is optional until a DuckDNS token exists. When the
+	// files appear, a second listener starts on 8443; :8080 stays up so the lab
+	// never loses its local entry point while certificates are being arranged.
+	if certPresent() {
+		port := env("TLS_PORT", "8443")
+		go func() {
+			tlsSrv := &http.Server{
+				Addr:              ":" + port,
+				Handler:           handler,
+				ReadHeaderTimeout: 5 * time.Second,
+				IdleTimeout:       60 * time.Second,
+			}
+			log.Println("TLS listening on :" + port)
+			if err := tlsSrv.ListenAndServeTLS(env("TLS_CERT", ""), env("TLS_KEY", "")); err != nil {
+				log.Println("TLS listener:", err)
+			}
+		}()
+	} else {
+		log.Println("no certificate at TLS_CERT - HTTPS listener disabled, HTTP :8000 only")
 	}
 	// optional: the same records that back the UI can be served as a real
 	// zone, so http://lab.local:8080 works without /etc/hosts
 	startDNS()
+
+	// Background long-polling for /start, /follow and /done. It idles when no
+	// token is configured and only ever makes outbound HTTPS calls - no new
+	// public listener or webhook is opened for it.
+	startTelegramPoller()
 
 	log.Println("listening on :8000")
 	log.Fatal(srv.ListenAndServe())

@@ -110,9 +110,11 @@ table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 th { text-align: left; font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 500; padding: 9px 10px; border-bottom: 1px solid var(--line); }
 td { padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 tbody tr:hover td { background: var(--panel2); }
-.pill { display: inline-block; padding: 2px 9px; border-radius: 9px; font-size: 11.5px; border: 1px solid var(--line); color: var(--muted); }
+.pill { display: inline-block; padding: 2px 9px; border-radius: 9px; font-size: 11.5px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
 .pill.up { color: var(--ok); border-color: var(--ok); }
 .pill.down { color: var(--err); border-color: var(--err); }
+/* a terminated connection is not the same as a host that happens to be quiet */
+.pill.err { color: var(--err); border-color: var(--err); background: rgba(242, 73, 92, .12); }
 
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 input, select {
@@ -125,7 +127,13 @@ button.act { padding: 7px 13px; background: transparent; border: 1px solid var(-
 button.act:hover { border-color: var(--accent); color: var(--accent); }
 button.act.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button.act.primary:hover { opacity: .9; color: #fff; }
+/* cutting a connection off is destructive, so it does not look like every
+   other button on the row */
+button.act.danger { color: var(--err); border-color: rgba(242, 73, 92, .45); }
+button.act.danger:hover { border-color: var(--err); color: var(--err); background: rgba(242, 73, 92, .10); }
 button.act:disabled { opacity: .45; cursor: default; }
+tr.cut td { background: rgba(242, 73, 92, .05); }
+tr.cut td:first-child { box-shadow: inset 3px 0 0 var(--err); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 16px; }
 .card .k { font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 
@@ -197,6 +205,132 @@ button.act.on {
 
 [data-layout="simple"] .capacity { display: none !important; }
 [data-layout="simple"] canvas.mini { display: none; }
+/* Simple is a real mode, not just a hidden chart: the device cards lose their
+   sparkline row, so the whole grid tightens up and more hosts fit on screen. */
+[data-layout="simple"] .dev { padding: 9px 11px; }
+[data-layout="simple"] .dev .k { font-size: 13px; }
+[data-layout="simple"] .grid { gap: 8px; }
+
+/* ---- topology: device cards, drawn like the lab simulator ---- */
+.tp-card { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
+.tp-card.ctrl { stroke: var(--accent); stroke-width: 1.7; }
+.tp-card.rt { stroke: var(--accent); stroke-width: 1.4; }
+.tp-card.sw { stroke: var(--warn); stroke-width: 1.4; }
+.tp-card.host { stroke: var(--line); stroke-width: 1; }
+.tp-card.host.on { stroke: var(--ok); stroke-width: 1.4; }
+/* planned but holding no lease: drawn, but visibly not there yet */
+.tp-card.host.idle { stroke: var(--line); stroke-width: 1.1; stroke-dasharray: 5 4; opacity: .9; }
+/* connection terminated: still a known host, no longer reachable */
+.tp-card.host.cut { stroke: var(--err); stroke-width: 1.5; stroke-dasharray: 5 3; fill: rgba(242, 73, 92, .07); }
+.tp-card.down { stroke: var(--err); stroke-width: 1.4; stroke-dasharray: 4 3; }
+.tp-name { font-size: 12px; font-weight: 600; fill: var(--ink); }
+.tp-ip { font-size: 10px; fill: var(--muted);
+         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+/* uplinks carry traffic; the spare only lights up when a primary dies, so it is
+   drawn dashed - the picture has to show redundancy it is not using */
+.tp-primary { stroke: var(--accent); stroke-width: 1.7; }
+.tp-backup { stroke: var(--ok); stroke-width: 1.5; stroke-dasharray: 6 5; }
+.tp-link { stroke: var(--topo-line); stroke-width: 1.4; }
+.tp-ctrl { stroke: var(--ok); stroke-width: 1.3; stroke-dasharray: 4 5; }
+.tp-peer { stroke: var(--topo-line); stroke-width: 1.3; stroke-dasharray: 3 4; }
+.tp-access { stroke: var(--topo-line); stroke-width: 1.1; opacity: .55; }
+/* a link that cannot carry traffic, and the cross that says so */
+.tp-blocked { stroke: var(--err); stroke-width: 1.5; stroke-dasharray: 4 4; opacity: .95; }
+.tp-x line { stroke: var(--err); stroke-width: 2; stroke-linecap: round; }
+.tp-zone { fill: none; stroke: var(--line); stroke-dasharray: 3 5; opacity: .85; }
+.tp-zonelbl { font-size: 10.5px; fill: var(--muted); letter-spacing: .05em; }
+.tp-dev:hover .tp-card { stroke: var(--accent); stroke-width: 2; }
+.tp-dev text { pointer-events: none; }
+
+/* ---- tracing one PC's route: everything off the path fades back ---- */
+svg.tp-focus .tp-card { opacity: .38; }
+svg.tp-focus line, svg.tp-focus path { opacity: .16; }
+svg.tp-focus .lit { opacity: 1; }
+svg.tp-focus line.lit { stroke-width: 2.6; }
+svg.tp-focus .tp-dev.lit .tp-card { opacity: 1; stroke-width: 2.2; }
+svg.tp-focus .tp-x.lit { opacity: 1; }
+/* a fault badge is the point of the picture - never fade it out */
+svg.tp-focus .tp-flag path, svg.tp-focus .tp-flag circle { opacity: 1; }
+
+/* ---- faults: a soft ring behind the card, and the X on its corner ---- */
+.tp-halo { fill: none; stroke: var(--err); stroke-width: 3; opacity: .55; }
+.tp-halo.warn { stroke: var(--warn); opacity: .5; }
+.tp-flag { cursor: pointer; }
+.tp-flag-bg { fill: var(--err); stroke: var(--panel); stroke-width: 1.8; }
+.tp-flag.warn .tp-flag-bg { fill: var(--warn); }
+.tp-flag path { fill: none; stroke: #fff; stroke-width: 1.8; stroke-linecap: round; }
+.tp-flag.warn path { stroke: #241f00; }
+.tp-dot { fill: #241f00; stroke: none; }
+.tp-flag:hover .tp-flag-bg { stroke: var(--ink); }
+
+/* ---- the panel behind a click on the X ---- */
+.tp-pop {
+  position: fixed; z-index: 90; min-width: 250px; max-width: 350px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 7px;
+  padding: 10px 12px; box-shadow: 0 14px 32px rgba(0, 0, 0, .45);
+  font-size: 12.5px; line-height: 1.5; color: var(--ink);
+}
+.tp-pop.err { border-color: rgba(242, 73, 92, .65); }
+.tp-pop.warn { border-color: rgba(184, 134, 11, .65); }
+.tp-pop-h { display: flex; align-items: center; gap: 7px; font-weight: 600; margin-bottom: 5px; }
+.tp-pop-h i { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: 0 0 auto; }
+.tp-pop.err .tp-pop-h i { background: var(--err); }
+.tp-pop-r { position: relative; padding: 3px 0 3px 14px; color: var(--muted); }
+.tp-pop-r::before {
+  content: ''; position: absolute; left: 2px; top: 10px;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--muted);
+}
+.tp-pop-r.err::before { background: var(--err); }
+.tp-pop-r.warn::before { background: var(--warn); }
+
+/* ---- the same X in a table row ---- */
+.issue-x { background: none; border: 0; padding: 0 2px; cursor: pointer; line-height: 0; vertical-align: middle; }
+.issue-x:hover { filter: brightness(1.15); }
+.ix-bg { fill: var(--err); }
+.issue-x.warn .ix-bg { fill: var(--warn); }
+.ix-mark { fill: none; stroke: #fff; stroke-width: 1.9; stroke-linecap: round; }
+.issue-x.warn .ix-mark { stroke: #241f00; }
+.ix-mark-f { fill: #241f00; stroke: none; }
+
+/* ---- packets climbing host -> switch -> router -> controller ---- */
+/* The ring is what makes them readable: a plain blue dot the width of a link
+   disappears into the diagram, which is exactly what happened the first time. */
+.tp-pkt { fill: var(--accent); stroke: var(--ink); stroke-width: 1.1; opacity: .95; }
+/* on the spare: the packet is taking the failover path, not the primary */
+.tp-pkt.alt { fill: var(--warn); }
+
+/* ---- anything unavailable pulses, so a dead box is not a still image ---- */
+@keyframes tp-flash {
+  0%, 100% { stroke-opacity: 1; opacity: 1; }
+  50% { stroke-opacity: .18; opacity: .55; }
+}
+.tp-card.down,
+.tp-card.host.cut,
+.tp-card.sw.down { animation: tp-flash 1.6s ease-in-out infinite; }
+.tp-flag.err .tp-flag-bg,
+.tp-halo.err { animation: tp-flash 1.6s ease-in-out infinite; }
+.dev-card.down {
+  border-color: var(--err);
+  box-shadow: inset 3px 0 0 var(--err);
+  animation: tp-flash 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tp-card.down, .tp-card.host.cut, .tp-card.sw.down,
+  .tp-flag.err .tp-flag-bg, .tp-halo.err, .dev-card.down { animation: none; }
+}
+
+/* ---- status counters above the drawing ---- */
+.tp-stats { display: flex; gap: 12px; font-size: 12.5px; color: var(--muted); }
+.tp-stat b { color: var(--ink); font-weight: 600; }
+.tp-stat.ok b { color: var(--ok); }
+.tp-stat.err b { color: var(--err); }
+.tp-stat.warn b { color: var(--warn); }
+
+/* dashed swatches in the legend, matching the lines in the drawing */
+.legend i.dash { background: none; border-top: 2px dashed var(--topo-line); height: 0; }
+.legend i.dash.ok { border-top-color: var(--ok); }
+.legend i.dash.accent { border-top-color: var(--accent); }
+.legend i.dash.err { border-top-color: var(--err); }
 
 .side .logout { flex: 0 0 auto; position: relative; z-index: 3; min-height: 40px; }
 .scope { margin-bottom: 9px; }
@@ -291,6 +425,13 @@ body { overflow-x: auto; }
 [data-theme="light"] .chip-warn { background: rgba(184, 134, 11, .14); color: #8a6508; }
 [data-theme="light"] .chip-crit { background: rgba(179, 38, 30, .12); color: #b3261e; }
 
+/* ---- on-call marker: the row that holds the pager right now ---- */
+.chip-ok { background: rgba(52, 199, 123, .16); color: #35c07c; }
+[data-theme="light"] .chip-ok { background: rgba(23, 122, 74, .12); color: #177a4a; }
+tr.oncall { background: rgba(52, 199, 123, .10); box-shadow: inset 3px 0 0 var(--ok); }
+tr.oncall td { border-bottom-color: rgba(52, 199, 123, .22); }
+[data-theme="light"] tr.oncall { background: rgba(23, 122, 74, .07); }
+
 .filter-wrap { position: relative; }
 .filter-menu {
   display: none; position: absolute; top: 112%; left: 0; z-index: 30;
@@ -332,6 +473,13 @@ select.log-act {
    than the viewport: the sidebar already eats 208px. */
 #view table { table-layout: auto; }
 #view td, #view th { overflow-wrap: anywhere; }
+/* Task 3: "overflow-wrap: anywhere" let a narrow Status column split a word
+   ("Closed" -> "Close\nd"). Status cells opt out of wrapping entirely and are
+   centre-aligned; the ID selector is needed to beat #view td's specificity. */
+#view td.status-col, #view th.status-col {
+  white-space: nowrap; overflow-wrap: normal; word-break: normal;
+  text-align: center; width: 1%; vertical-align: middle;
+}
 .log-msg { max-width: 420px; word-break: break-word; }
 
 /* Inline rename field: it sits inside a cell and should not look like a form */
@@ -353,3 +501,72 @@ input.lease-name:focus { border-style: solid; border-color: var(--accent); outli
 /* Sidebar has more entries now; keep it scrollable on short screens instead of
    letting the logout button fall off the bottom. */
 .side nav { overflow-y: auto; }
+
+/* ---- v26: system health bar, operations widgets, node telemetry ---- */
+.statusbar {
+  display: flex; flex-wrap: wrap; gap: 7px; align-items: center;
+  margin: 0 0 11px; padding: 7px 10px;
+  border: 1px solid var(--line); border-radius: 5px; background: var(--panel);
+  font-size: 12px; color: var(--muted);
+}
+.sb-item { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px 2px 7px;
+  border-right: 1px solid var(--line); white-space: nowrap; }
+.sb-item:last-of-type { border-right: 0; }
+.sb-item i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+.sb-item.ok i { background: var(--ok); }
+.sb-item.err i { background: var(--err); }
+.sb-item b { color: var(--ink); font-weight: 600; }
+/* The old top-right "Gap analysis →" link (.sb-more) is gone. It is replaced
+   by a Telegram login button available to every signed-in user; the admin-only
+   Bot Token stays in Settings (runbook 4.1d / 4.1c). */
+.sb-tg {
+  margin-left: auto; padding: 4px 11px; border-radius: 4px;
+  border: 1px solid var(--accent); background: transparent;
+  color: var(--accent); font: inherit; font-size: 12px; font-weight: 600;
+  white-space: nowrap; cursor: pointer;
+}
+.sb-tg:hover { background: var(--panel2); }
+
+.op-grid { display: grid; gap: 9px; grid-template-columns: repeat(auto-fit, minmax(268px, 1fr)); }
+.panel.op { padding: 11px 13px; }
+.op .p-title { margin-bottom: 8px; }
+.op-kv { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0;
+  font-size: 12.5px; border-bottom: 1px dashed var(--line); }
+.op-kv:last-of-type { border-bottom: 0; }
+.op-kv span { color: var(--muted); flex: 0 0 auto; }
+.op-kv b { font-weight: 600; text-align: right; word-break: break-word; }
+.op-kv b.ok { color: var(--ok); }
+.op-kv b.err { color: var(--err); }
+.op-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
+.op-table { width: 100%; font-size: 12px; }
+.op-table th { text-align: left; color: var(--muted); font-weight: 500; padding: 3px 5px; }
+.op-table td { padding: 3px 5px; border-top: 1px solid var(--line); }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--muted); margin-right: 5px; vertical-align: middle; }
+.dot.ok { background: var(--ok); }
+.dot.err { background: var(--err); }
+.op-feed { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.op-feed-col h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.feed-row { font-size: 12px; padding: 3px 0; border-bottom: 1px dashed var(--line);
+  display: flex; gap: 8px; align-items: baseline; }
+.feed-row .mono { color: var(--muted); font-size: 11px; flex: 0 0 auto; }
+.feed-row.high, .feed-row.disaster, .feed-row.critical { color: var(--err); }
+.feed-row.warning, .feed-row.average { color: var(--warn); }
+
+.ssh-chip { font-size: 10.5px; padding: 1px 6px; border-radius: 8px;
+  border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.ssh-chip.ok { color: var(--ok); border-color: var(--ok); }
+.ssh-chip.err { color: var(--err); border-color: var(--err); }
+.dev-foot { display: flex; justify-content: space-between; align-items: center;
+  gap: 8px; margin-top: 8px; }
+.dev-foot .act { height: 27px; padding: 0 9px; font-size: 11.5px; }
+
+.gap-recs { margin: 8px 0 0; padding-left: 20px; font-size: 12.5px;
+  color: var(--muted); line-height: 1.65; }
+.gap-recs li { margin-bottom: 5px; }
+.gap-recs b { color: var(--ink); }
+
+/* ---- Cloudflare tunnel link in the Trust & access widget ---- */
+.op-kv.tunnel-link a { color: var(--accent); font-weight: 600; word-break: break-all; font-size: 11.5px; }
+.op-kv.tunnel-link a:hover { text-decoration: underline; }
+.ssh-chip.local { color: var(--accent); border-color: var(--accent); }

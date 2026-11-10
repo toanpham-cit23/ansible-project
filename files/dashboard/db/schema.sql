@@ -183,6 +183,12 @@ CREATE TABLE IF NOT EXISTS ip_leases (
   last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
   -- a MAC can move: remember the previous bindings
   moved_from  TEXT,
+  -- connection cut by an operator: the address stays known, the host stops
+  -- being reachable. `blocked` is read by the poller and by the simulator, so
+  -- the table, the diagram and the container agree on what offline means.
+  blocked     INTEGER NOT NULL DEFAULT 0 CHECK (blocked IN (0,1)),
+  blocked_at  TEXT,
+  blocked_by  TEXT,
   UNIQUE (ip, mac)
 );
 
@@ -199,7 +205,7 @@ CREATE TABLE IF NOT EXISTS lease_events (
   ts        TEXT NOT NULL DEFAULT (datetime('now')),
   ip        TEXT NOT NULL,
   mac       TEXT NOT NULL,
-  kind      TEXT NOT NULL CHECK (kind IN ('new','gone','moved','renamed','static')),
+  kind      TEXT NOT NULL,
   detail    TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_lease_events_ts ON lease_events(ts DESC);
@@ -241,6 +247,7 @@ CREATE TABLE IF NOT EXISTS shift_admins (
   name       TEXT NOT NULL,
   email      TEXT NOT NULL,
   phone      TEXT,
+  telegram   TEXT NOT NULL DEFAULT '',      -- Telegram @username for incident mentions (B.9 / runbook 4.1b)
   -- weekly availability: 0=Monday .. 6=Sunday, stored as a bitmask
   days_mask  INTEGER NOT NULL DEFAULT 127,
   starts_at  TEXT NOT NULL DEFAULT '08:00',
@@ -371,6 +378,85 @@ CREATE TABLE IF NOT EXISTS dns_records (
   UNIQUE (name, kind)
 );
 CREATE INDEX IF NOT EXISTS ix_dns_ip ON dns_records(ip);
+
+-- ---------------------------------------------------------------- B.9 new device discovery
+-- Fed idempotently by the Go API from ip_leases (which poller.py fills from
+-- each router's ARP table). `known` = already in devices / host_design.
+CREATE TABLE IF NOT EXISTS discovered_devices (
+  id          INTEGER PRIMARY KEY,
+  mac         TEXT NOT NULL,
+  ip          TEXT NOT NULL DEFAULT '',
+  hostname    TEXT NOT NULL DEFAULT '',
+  device_name TEXT NOT NULL DEFAULT '',
+  vendor      TEXT NOT NULL DEFAULT '',
+  seen_on     TEXT NOT NULL DEFAULT '',
+  if_name     TEXT NOT NULL DEFAULT '',
+  source      TEXT NOT NULL DEFAULT 'arp',
+  first_seen  TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
+  online      INTEGER NOT NULL DEFAULT 1,
+  known       INTEGER NOT NULL DEFAULT 0,
+  state       TEXT NOT NULL DEFAULT 'new'
+              CHECK (state IN ('new','acknowledged','ignored')),
+  note        TEXT NOT NULL DEFAULT '',
+  reviewed_by TEXT NOT NULL DEFAULT '',
+  reviewed_at TEXT,
+  UNIQUE (mac, ip)
+);
+CREATE INDEX IF NOT EXISTS ix_discovered_seen  ON discovered_devices(first_seen DESC);
+CREATE INDEX IF NOT EXISTS ix_discovered_state ON discovered_devices(known, state);
+
+-- ---------------------------------------------------------------- Telegram alerts
+-- SECURITY: token_enc holds an AES-GCM ciphertext, never a plaintext token.
+-- The plaintext is supplied either by TELEGRAM_BOT_TOKEN (env) or by an admin
+-- through the Settings screen. No secret is committed to this repository.
+CREATE TABLE IF NOT EXISTS telegram_config (
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  chat_id      TEXT NOT NULL DEFAULT '',
+  bot_username TEXT NOT NULL DEFAULT '',
+  token_enc    BLOB,
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_by   TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS telegram_users (
+  user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  telegram_id TEXT NOT NULL DEFAULT '',
+  username    TEXT NOT NULL DEFAULT '',
+  followed    INTEGER NOT NULL DEFAULT 0,
+  linked_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS telegram_followers (
+  telegram_id TEXT PRIMARY KEY,
+  username    TEXT NOT NULL DEFAULT '',
+  first_seen  TEXT NOT NULL DEFAULT (datetime('now')),
+  source      TEXT NOT NULL DEFAULT 'start'
+);
+CREATE TABLE IF NOT EXISTS telegram_link_tokens (
+  token      TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL,
+  expires_at TEXT NOT NULL,
+  used       INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS telegram_incidents (
+  code       TEXT PRIMARY KEY,
+  rule       TEXT NOT NULL DEFAULT '',
+  summary    TEXT NOT NULL DEFAULT '',
+  status     TEXT NOT NULL DEFAULT 'Đang chờ lệnh',
+  by_user    TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS telegram_deliveries (
+  id            INTEGER PRIMARY KEY,
+  ts            TEXT NOT NULL DEFAULT (datetime('now')),
+  chat_id       TEXT NOT NULL DEFAULT '',
+  text          TEXT NOT NULL DEFAULT '',
+  status        TEXT NOT NULL DEFAULT '',
+  error         TEXT NOT NULL DEFAULT '',
+  incident_code TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_tg_deliveries_ts ON telegram_deliveries(ts DESC);
+INSERT OR IGNORE INTO telegram_config(id) VALUES (1);
 
 -- ---------------------------------------------------------------- seed rows
 INSERT OR IGNORE INTO settings(key, value) VALUES

@@ -22,6 +22,47 @@ import (
 
 // ---------------------------------------------------------------- migration
 
+// widenLeaseEventKinds drops the fixed list of lease event kinds.
+//
+// The table was created with CHECK (kind IN ('new','gone','moved','renamed',
+// 'static')). Terminating a connection adds two more kinds, and SQLite cannot
+// alter a constraint in place, so the table is rebuilt once. The guard is the
+// old CHECK still being present, which makes this a no-op on every start after
+// the first and on a database created fresh by this version.
+func widenLeaseEventKinds() {
+	var ddl string
+	if db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='lease_events'`).
+		Scan(&ddl) != nil {
+		return
+	}
+	if !strings.Contains(ddl, "CHECK") {
+		return
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return
+	}
+	for _, s := range []string{
+		`CREATE TABLE lease_events_new (
+			id     INTEGER PRIMARY KEY,
+			ts     TEXT NOT NULL DEFAULT (datetime('now')),
+			ip     TEXT NOT NULL,
+			mac    TEXT,
+			kind   TEXT NOT NULL,
+			detail TEXT)`,
+		`INSERT INTO lease_events_new (id, ts, ip, mac, kind, detail)
+		 SELECT id, ts, ip, mac, kind, detail FROM lease_events`,
+		`DROP TABLE lease_events`,
+		`ALTER TABLE lease_events_new RENAME TO lease_events`,
+	} {
+		if _, err := tx.Exec(s); err != nil {
+			_ = tx.Rollback()
+			return
+		}
+	}
+	_ = tx.Commit()
+}
+
 // ensureLabSchema creates the tables the poller writes and this API reads.
 // Everything is additive and idempotent: on an existing database the CREATEs
 // are no-ops and the ALTERs fail with "duplicate column", which is the steady
@@ -51,8 +92,19 @@ func ensureLabSchema() {
 			ts       TEXT NOT NULL DEFAULT (datetime('now')),
 			ip       TEXT NOT NULL,
 			mac      TEXT,
-			kind     TEXT NOT NULL CHECK (kind IN ('new','gone','moved','renamed','static')),
+			kind     TEXT NOT NULL,
 			detail   TEXT)`,
+		// The lab as designed, rather than as observed: which VLAN each MAC
+		// belongs to and which router owns that VLAN. The poller reads this to
+		// label a lease, because on a flat segment every router sees every host
+		// and "seen on" would otherwise just be whichever was polled first.
+		`CREATE TABLE IF NOT EXISTS host_design (
+			mac      TEXT PRIMARY KEY,
+			hostname TEXT NOT NULL DEFAULT '',
+			vlan_id  INTEGER NOT NULL,
+			switch   TEXT NOT NULL DEFAULT '',
+			router   TEXT NOT NULL DEFAULT '',
+			site_id  INTEGER)`,
 		`CREATE TABLE IF NOT EXISTS device_reboots (
 			id             INTEGER PRIMARY KEY,
 			device_id      INTEGER REFERENCES devices(id) ON DELETE CASCADE,
@@ -202,9 +254,16 @@ func ensureLabSchema() {
 		"ALTER TABLE devices ADD COLUMN community TEXT",
 		"ALTER TABLE links ADD COLUMN discovered INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE links ADD COLUMN evidence TEXT",
+		// A terminated connection is a state the lease carries, not a row we
+		// delete: the address stays known, it just stops being reachable.
+		"ALTER TABLE ip_leases ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE ip_leases ADD COLUMN blocked_at TEXT",
+		"ALTER TABLE ip_leases ADD COLUMN blocked_by TEXT",
 	} {
 		_, _ = db.Exec(a)
 	}
+
+	widenLeaseEventKinds()
 
 	// Make sure the management network is a known subnet. Without a row here
 	// every lease falls back to the inferred /24 with no VLAN, and the lease
@@ -273,7 +332,8 @@ func handleLeases(w http.ResponseWriter, r *http.Request, u *User) {
 	q := `SELECT id, ip, mac, COALESCE(hostname,''), COALESCE(device_name,''),
 	             vlan_id, COALESCE(subnet,''), COALESCE(seen_on,''),
 	             COALESCE(if_index,''), source, is_static, online,
-	             first_seen, last_seen, COALESCE(moved_from,'')
+	             first_seen, last_seen, COALESCE(moved_from,''),
+	             blocked, COALESCE(blocked_at,''), COALESCE(blocked_by,'')
 	      FROM ip_leases`
 	args := []any{}
 	var where []string
@@ -300,14 +360,31 @@ func handleLeases(w http.ResponseWriter, r *http.Request, u *User) {
 	}
 	defer rs.Close()
 
+	// Infrastructure addresses are not connections anybody may cut. The
+	// controller is running this dashboard, and the routers are what the
+	// dashboard is watching - terminating either is not an operation, it is a
+	// way to take the tool down with it.
+	infra := map[string]bool{}
+	if ir, err := db.Query(`SELECT mgmt_ip FROM devices`); err == nil {
+		for ir.Next() {
+			var ip string
+			if ir.Scan(&ip) == nil && ip != "" {
+				infra[ip] = true
+			}
+		}
+		_ = ir.Close()
+	}
+
 	out := []map[string]any{}
 	for rs.Next() {
 		var id int64
 		var ip, mac, host, name, subnet, seenOn, ifIdx, source, first, last, moved string
+		var blockedAt, blockedBy string
 		var vlan sql.NullInt64
-		var isStatic, on int
+		var isStatic, on, blocked int
 		if rs.Scan(&id, &ip, &mac, &host, &name, &vlan, &subnet, &seenOn,
-			&ifIdx, &source, &isStatic, &on, &first, &last, &moved) != nil {
+			&ifIdx, &source, &isStatic, &on, &first, &last, &moved,
+			&blocked, &blockedAt, &blockedBy) != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -317,6 +394,8 @@ func handleLeases(w http.ResponseWriter, r *http.Request, u *User) {
 			"if_index": ifIdx, "source": source, "is_static": isStatic == 1,
 			"online": on == 1, "first_seen": first, "last_seen": last,
 			"moved_from": moved,
+			"blocked":    blocked == 1, "blocked_at": blockedAt, "blocked_by": blockedBy,
+			"protected":  infra[ip],
 		})
 	}
 
@@ -405,6 +484,95 @@ func handlePatchLease(w http.ResponseWriter, r *http.Request, u *User) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// ---------------------------------------------------------------- terminate
+
+// leaseSubject returns the label, address and MAC a message should mention.
+// A lease can be unnamed, in which case the address is the only handle on it.
+func leaseSubject(id int64) (label, ip, mac string, blocked int, err error) {
+	var name, host string
+	err = db.QueryRow(`SELECT ip, COALESCE(mac,''), COALESCE(device_name,''),
+	                          COALESCE(hostname,''), blocked
+	                   FROM ip_leases WHERE id = ?`, id).
+		Scan(&ip, &mac, &name, &host, &blocked)
+	if err != nil {
+		return "", "", "", 0, err
+	}
+	label = name
+	if label == "" {
+		label = host
+	}
+	if label == "" {
+		label = ip
+	}
+	return label, ip, mac, blocked, nil
+}
+
+// handleTerminateLease cuts a host off.
+//
+// The row is not deleted. A terminated connection is a state: the address is
+// still known, the operator still wants to see it in the table, and the reason
+// and the time are part of the record. `blocked` is what the poller and the
+// simulator read, so the three agree on what "offline" means - the diagram, the
+// lease table and the container itself.
+func handleTerminateLease(w http.ResponseWriter, r *http.Request, u *User) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	label, ip, mac, blocked, err := leaseSubject(id)
+	if err != nil {
+		fail(w, http.StatusNotFound, "no such lease")
+		return
+	}
+	// Refused here, not just hidden in the UI: the controller is running this
+	// dashboard and the routers are what it watches. A hidden button is a
+	// suggestion; a 409 is a rule.
+	var managed int
+	if db.QueryRow(`SELECT COUNT(*) FROM devices WHERE mgmt_ip = ?`, ip).Scan(&managed) == nil && managed > 0 {
+		fail(w, http.StatusConflict,
+			"this address belongs to a managed device - cutting it would take the monitoring path down with it")
+		return
+	}
+	if blocked == 1 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already": true})
+		return
+	}
+	if _, err := db.Exec(`UPDATE ip_leases
+	                      SET blocked = 1, blocked_at = datetime('now'),
+	                          blocked_by = ?, online = 0
+	                      WHERE id = ?`, u.Username, id); err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = db.Exec(`INSERT INTO lease_events(ip, mac, kind, detail) VALUES (?,?,?,?)`,
+		ip, mac, "terminated", "connection cut by "+u.Username)
+	logEvent(0, "high", fmt.Sprintf("connection terminated: %s (%s) - cut by %s",
+		label, ip, u.Username))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ip": ip, "blocked": true})
+}
+
+// handleRestoreLease puts a terminated host back on the wire.
+func handleRestoreLease(w http.ResponseWriter, r *http.Request, u *User) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	label, ip, mac, blocked, err := leaseSubject(id)
+	if err != nil {
+		fail(w, http.StatusNotFound, "no such lease")
+		return
+	}
+	if blocked == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already": true})
+		return
+	}
+	if _, err := db.Exec(`UPDATE ip_leases
+	                      SET blocked = 0, blocked_at = NULL, blocked_by = NULL
+	                      WHERE id = ?`, id); err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = db.Exec(`INSERT INTO lease_events(ip, mac, kind, detail) VALUES (?,?,?,?)`,
+		ip, mac, "restored", "connection restored by "+u.Username)
+	logEvent(0, "info", fmt.Sprintf("connection restored: %s (%s) - by %s",
+		label, ip, u.Username))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ip": ip, "blocked": false})
+}
+
 // ---------------------------------------------------------------- reboot / power
 
 // handleReboots reports restarts and the power-loss inferences.
@@ -479,7 +647,8 @@ func handleReachability(w http.ResponseWriter, r *http.Request, u *User) {
 // handleShifts lists the roster plus who is on call right now.
 func handleShifts(w http.ResponseWriter, r *http.Request, u *User) {
 	rs, err := db.Query(`SELECT id, name, email, COALESCE(phone,''), role, days_mask,
-	                            starts_at, ends_at, sort_order, active
+	                            starts_at, ends_at, sort_order, active,
+	                            COALESCE(telegram,'')
 	                     FROM shift_admins ORDER BY active DESC, sort_order, id`)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
@@ -489,13 +658,13 @@ func handleShifts(w http.ResponseWriter, r *http.Request, u *User) {
 	out := []map[string]any{}
 	for rs.Next() {
 		var id, mask, order, active int64
-		var name, email, phone, role, starts, ends string
+		var name, email, phone, role, starts, ends, telegram string
 		if rs.Scan(&id, &name, &email, &phone, &role, &mask, &starts, &ends,
-			&order, &active) == nil {
+			&order, &active, &telegram) == nil {
 			out = append(out, map[string]any{"id": id, "name": name, "email": email,
 				"phone": phone, "role": role, "days_mask": mask,
 				"starts_at": starts, "ends_at": ends, "sort_order": order,
-				"active": active == 1,
+				"active": active == 1, "telegram": telegram,
 				"days":   maskToDays(mask)})
 		}
 	}
@@ -657,6 +826,7 @@ func handlePutShift(w http.ResponseWriter, r *http.Request, u *User) {
 		Name     string   `json:"name"`
 		Email    string   `json:"email"`
 		Phone    string   `json:"phone"`
+		Telegram string   `json:"telegram"` // Telegram @username for incident mentions
 		Role     string   `json:"role"`
 		Days     []string `json:"days"`
 		StartsAt string   `json:"starts_at"`
@@ -691,10 +861,16 @@ func handlePutShift(w http.ResponseWriter, r *http.Request, u *User) {
 	if b.Active != nil && !*b.Active {
 		active = 0
 	}
+	// Store the bare username. "@" is re-added when building a mention, so an
+	// operator pasting "@nguyenvana" cannot produce "@@nguyenvana".
+	telegram := strings.TrimPrefix(strings.TrimSpace(b.Telegram), "@")
+	if len(telegram) > 64 {
+		telegram = telegram[:64]
+	}
 	if b.ID > 0 {
-		_, err := db.Exec(`UPDATE shift_admins SET name=?, email=?, phone=?, role=?,
+		_, err := db.Exec(`UPDATE shift_admins SET name=?, email=?, phone=?, telegram=?, role=?,
 		                   days_mask=?, starts_at=?, ends_at=?, active=? WHERE id=?`,
-			b.Name, b.Email, b.Phone, role, mask, starts, ends, active, b.ID)
+			b.Name, b.Email, b.Phone, telegram, role, mask, starts, ends, active, b.ID)
 		if err != nil {
 			fail(w, http.StatusInternalServerError, err.Error())
 			return
@@ -702,9 +878,9 @@ func handlePutShift(w http.ResponseWriter, r *http.Request, u *User) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": b.ID})
 		return
 	}
-	res, err := db.Exec(`INSERT INTO shift_admins(name,email,phone,role,days_mask,
-	                     starts_at,ends_at,active) VALUES (?,?,?,?,?,?,?,?)`,
-		b.Name, b.Email, b.Phone, role, mask, starts, ends, active)
+	res, err := db.Exec(`INSERT INTO shift_admins(name,email,phone,telegram,role,days_mask,
+	                     starts_at,ends_at,active) VALUES (?,?,?,?,?,?,?,?,?)`,
+		b.Name, b.Email, b.Phone, telegram, role, mask, starts, ends, active)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return

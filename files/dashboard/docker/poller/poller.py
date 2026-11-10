@@ -427,11 +427,45 @@ def collect_leases(c, devs, arp_by_dev, subnet_rows):
     existing = {(r["ip"], r["mac"]): r for r in
                 c.execute("SELECT * FROM ip_leases").fetchall()}
 
+    # A terminated connection stays in the table but stops being an online
+    # host. The router keeps its ARP entry until its own ageing timer drops it,
+    # which can be minutes, so presence in the ARP table is not evidence that
+    # the host is still alive - it only means the entry has not expired. That
+    # is why nothing here tries to infer "the cut did not take": the poller has
+    # no way to tell a live host from a stale entry, and guessing would file a
+    # false alarm on every termination.
+    has_blocked = existing and "blocked" in next(iter(existing.values())).keys()
+    if has_blocked:
+        for k in [k for k, r in existing.items() if r["blocked"]]:
+            observed.pop(k, None)
+
     changes = []
+    # The design wins over the wire. This lab is one flat segment, so every
+    # router reports every binding and "seen on" was just whichever router the
+    # loop reached first - which made the column useless and always said r1.
+    # host_design names the VLAN a MAC belongs to and the router that owns it,
+    # which is the answer a segmented network would have produced.
+    design = {}
+    try:
+        design = {str(r["mac"]).upper(): r for r in
+                  c.execute("SELECT mac, vlan_id, switch, router FROM host_design").fetchall()}
+    except sqlite3.OperationalError:
+        pass                                    # table arrives with the API migration
+    vlan_cidr = {s["vlan_id"]: s["cidr"] for s in subnet_rows if s["vlan_id"] is not None}
+
     for key, e in observed.items():
         sub = subnet_of(e["ip"], subnet_rows)
         vlan = sub["vlan_id"] if sub else None
         cidr = sub["cidr"] if sub else None
+
+        d = design.get(str(e["mac"]).upper())
+        if d:
+            vlan = d["vlan_id"]
+            cidr = vlan_cidr.get(d["vlan_id"]) or cidr
+            if d["router"]:
+                e["seen_on"] = d["router"]
+            if d["switch"]:
+                e["if_name"] = d["switch"]
 
         row = existing.get(key)
         if row is None:
@@ -521,7 +555,7 @@ def emit(c, device_id, severity, message):
         c.execute("UPDATE events SET ts=datetime('now') WHERE id=?", (dup["id"],))
         return None
     cur = c.execute("INSERT INTO events(device_id, severity, message, sig) VALUES (?,?,?,?)",
-                    (device_id, severity, message, sig))
+                    (device_id or None, severity, message, sig))
     return cur.lastrowid
 
 

@@ -11,8 +11,13 @@ services:
       NETDB: /data/net.db
       NETDB_KEY: ${NETDB_KEY:-}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
-      COOKIE_SECURE: "false"
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
       STATIC_DIR: /app/static
+      # Trusted certificate, installed into ./db/certs by ops/acme-issue.sh.
+      # Both files are optional: without them only the HTTP listener starts.
+      TLS_CERT: /data/certs/fullchain.pem
+      TLS_KEY: /data/certs/key.pem
+      TLS_PORT: "8443"
       GOGC: "40"
       GOMEMLIMIT: 40MiB
       ADMIN_USER: ${ADMIN_USER:-admin}
@@ -31,10 +36,24 @@ services:
       LAB_DNS_LISTEN: ${LAB_DNS_LISTEN:-:5353}
       LAB_DNS_UPSTREAM: ${LAB_DNS_UPSTREAM:-}
       LAB_DNS_PUBLIC_PORT: ${LAB_DNS_PUBLIC_PORT:-53}
+      # ---- Telegram incident alerts (internal alerts ONLY, not end-user mail)
+      # Leave empty here and either put real values in an untracked .env or
+      # paste them once as admin in the dashboard Settings screen. A token
+      # entered in the UI is AES-GCM encrypted in SQLite, never plaintext.
+      # Placeholders for the operator to fill in later:
+      #   TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN_HERE      (from BotFather)
+      #   TELEGRAM_CHAT_ID=YOUR_CHAT_ID_HERE         (group id, e.g. -1001234567890)
+      #   TELEGRAM_BOT_USERNAME=YOUR_BOT_USERNAME_HERE
+      #   MEMBERS=YOUR_ONCALL_USERNAMES_HERE         (comma separated, optional)
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      MEMBERS: ${MEMBERS:-}
     volumes:
       - ./db:/data
     ports:
       - "8080:8000"
+      - "8443:8443"
       # UDP only: a zone this small is answered from memory in one packet
       - "53:5353/udp"
     mem_limit: 80m
