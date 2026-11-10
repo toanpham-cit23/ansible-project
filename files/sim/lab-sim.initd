@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+# Keeps the simulated PCs in step with the dashboard.
+#
+# The dashboard runs read-only with no Docker socket, so it cannot pause a
+# container itself. It records that a connection was terminated and this
+# service carries it out - which is what turns "marked offline in the table"
+# into "actually stops answering on the wire".
+
+name="lab-sim"
+description="Docker user simulator - pauses containers whose lease is terminated"
+
+command="/usr/bin/python3"
+# -u so the log is written as it happens: redirected to a file, python buffers
+# and the log looks empty until the service stops.
+command_args="-u /root/lab-sim/simctl.py watch --interval 5"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/lab-sim.log"
+error_log="/var/log/lab-sim.log"
+
+depend() {
+	need net docker
+	after docker
+}
+
+start_pre() {
+	checkpath --file --mode 0644 /var/log/lab-sim.log
+}

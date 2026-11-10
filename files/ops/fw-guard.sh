@@ -107,6 +107,14 @@ case "${1:-status}" in
     ;;
 
   guard)
+    # Docker and host network restarts can drop custom INPUT chains. Once the
+    # rules were confirmed, put them back without re-arming the 180 s deadline
+    # - a confirmed firewall is meant to be permanent.
+    if [ -f "$CONFIRMED" ] && ! iptables -nL INPUT 2>/dev/null | grep -q "$CHAIN"; then
+      "$0" apply   >/dev/null 2>&1
+      "$0" confirm >/dev/null 2>&1
+      exit 0
+    fi
     [ -f "$DEADLINE" ] || exit 0
     if [ -f "$CONFIRMED" ]; then
       rm -f "$DEADLINE"
