@@ -1,0 +1,72 @@
+---
+# User simulator - eight containers that look like workstations.
+#
+# The lab has routers but no PCs, so the dashboard's topology view had nothing
+# to draw below the switches. This copies the simulator onto the controller and
+# leaves it stopped; starting it is a deliberate act because it puts addresses
+# on the wire:
+#
+#   doas python3 /root/lab-sim/simctl.py up
+#
+# The containers are macvlan endpoints on the lab NIC. See files/sim/README.md.
+- name: User simulator - containers standing in for workstations
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    sim_dir: /root/lab-sim
+    sim_src: "{{ playbook_dir }}/../files/sim"
+
+  tasks:
+    - name: Ensure the simulator directory exists
+      ansible.builtin.file:
+        path: "{{ sim_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy the simulator
+      ansible.builtin.copy:
+        src: "{{ sim_src }}/"
+        dest: "{{ sim_dir }}/"
+        mode: preserve
+
+    - name: Make the control script executable
+      ansible.builtin.file:
+        path: "{{ sim_dir }}/simctl.py"
+        mode: "0755"
+
+    # The service is what makes a terminated connection real on the wire: it
+    # pauses the container whose lease was cut. Without it the lease table says
+    # "terminated" while the host keeps answering, and the poller files an
+    # event saying exactly that.
+    - name: Install the reconciler service
+      ansible.builtin.copy:
+        src: "{{ sim_src }}/lab-sim.initd"
+        dest: /etc/init.d/lab-sim
+        mode: "0755"
+
+    - name: Enable and start the reconciler
+      ansible.builtin.shell: |
+        rc-update add lab-sim default 2>/dev/null || true
+        rc-service lab-sim restart >/dev/null 2>&1 || rc-service lab-sim start
+        sleep 1
+        rc-service lab-sim status >/dev/null 2>&1 && echo SIM_WATCH_OK || echo SIM_WATCH_FAIL
+      args:
+        executable: /bin/sh
+      register: sim_svc
+      changed_when: sim_svc.stdout is search('SIM_WATCH_OK')
+
+    - name: Check whether the macvlan network already exists
+      ansible.builtin.command: docker network inspect lab-users --format {{ '{{.Driver}}' }}
+      register: sim_net
+      changed_when: false
+      failed_when: false
+
+    - name: Report what is there
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'macvlan network lab-users present'
+             if sim_net.rc == 0
+             else 'no lab-users network yet - simctl.py up will create it' }},
+          reconciler {{ 'running' if sim_svc.stdout is search('SIM_WATCH_OK') else 'NOT running' }}

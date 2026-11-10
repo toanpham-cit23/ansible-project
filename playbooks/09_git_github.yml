@@ -1,152 +1,115 @@
 ---
+# Commit and push the lab project. All work happens on the controller over SSH.
+#
+#   ansible-playbook playbooks/09_git_github.yml
+#   ansible-playbook playbooks/09_git_github.yml -e commit_msg="my change"
+#
+# Two rules this playbook exists to enforce:
+#   1. Never embed a token in the remote URL (that writes it to .git/config in
+#      plaintext). The token is passed as an HTTP header at push time only.
+#   2. Never push without auditing the exact commit set for live secrets.
 - name: Push Ansible Project to GitHub
   hosts: localhost
   connection: local
   gather_facts: no
   vars:
     project_dir: /root/ansible-project
-    github_repo: "https://{{ github_token | default('') }}@github.com/toanpham-cit23/ansible-project.git"
+    github_repo: "https://github.com/toanpham-cit23/ansible-project.git"
+    commit_msg: "Lab dashboard: ops layer, trusted HTTPS, Cloudflare tunnel, controller card cleanup"
 
   tasks:
-    - name: Load token file if it exists
-      ansible.builtin.include_vars:
-        file: "{{ project_dir }}/token.yml"
-      failed_when: false
-      no_log: true
-
-    - name: Stop if the GitHub token is missing
-      ansible.builtin.fail:
-        msg: "{{ project_dir }}/token.yml not found or has no github_token. Run 08_vault.yml first."
-      when: github_token | default('') | length == 0
-
-    - name: Safety check - never push plaintext token
-      ansible.builtin.shell: | 
-        if grep -q ANSIBLE_VAULT {{ project_dir }}/token.yml; then
-          echo "TOKEN_ENCRYPTED"
-        else
-          echo "TOKEN_PLAINTEXT"
-        fi
+    - name: Verify token.yml exists and is vault-encrypted
+      ansible.builtin.shell: |
+        f="{{ project_dir }}/token.yml"
+        if [ ! -f "$f" ]; then echo MISSING; exit 0; fi
+        if head -1 "$f" | grep -q '^\$ANSIBLE_VAULT'; then echo ENCRYPTED; else echo PLAINTEXT; fi
       register: token_safety
       changed_when: false
 
-    - name: Stop push if token is not encrypted
+    - name: Refuse to continue without a vaulted token
       ansible.builtin.fail:
-        msg: "DANGER - token.yml is plaintext. Run 08_vault.yml first, then push."
-      when: token_safety.stdout != "TOKEN_ENCRYPTED"
+        msg: "token.yml is missing or plaintext. Run 08_vault.yml first; never commit a plain token."
+      when: token_safety.stdout | trim != 'ENCRYPTED'
 
-    - name: Show token safety result
+    - name: Pre-push secret audit
+      ansible.builtin.command: python3 {{ project_dir }}/files/ops/prepush-audit.py
+      args:
+        chdir: "{{ project_dir }}"
+      register: audit
+      changed_when: false
+
+    - name: Show audit result
       ansible.builtin.debug:
-        var: token_safety.stdout_lines
+        var: audit.stdout_lines
 
-    # force: no -> keeps the tracked .gitignore intact, only creates it if missing
-    - name: Ensure gitignore exists
-      ansible.builtin.copy:
-        dest: "{{ project_dir }}/.gitignore"
-        force: no
-        content: |
-          # Backups and generated configs - never commit router configs
-          backups/
-          **/backups/
-          *.conf
-          *.retry
-
-          # Secrets
-          token.yml
-          .vault_pass
-
-          # Offline .apk packages (tzdata / snmp / zabbix).
-          # Intentionally not in git: copy them to files/ on the control node by hand.
-          files/
-          devnull
-
-          # Misc
-          *.log
-          __pycache__/
-          .DS_Store
-
-    - name: Untrack token file
-      ansible.builtin.command: git rm --cached token.yml
+    - name: Configure git identity (repository local only)
+      ansible.builtin.shell: |
+        git config user.name "Ansible Deploy Bot"
+        git config user.email "deploy@lab.local"
       args:
         chdir: "{{ project_dir }}"
-      failed_when: false
+      changed_when: false
 
-    - name: Untrack vault pass file
-      ansible.builtin.command: git rm --cached .vault_pass
+    - name: Keep the remote free of embedded credentials
+      ansible.builtin.shell: |
+        git remote remove origin 2>/dev/null || true
+        git remote add origin {{ github_repo }}
       args:
         chdir: "{{ project_dir }}"
-      failed_when: false
+      changed_when: false
 
-    - name: Untrack playbooks backups
-      ansible.builtin.command: git rm -r --cached playbooks/backups
-      args:
-        chdir: "{{ project_dir }}"
-      failed_when: false
-
-    - name: Untrack root backups
-      ansible.builtin.command: git rm -r --cached backups
-      args:
-        chdir: "{{ project_dir }}"
-      failed_when: false
-
-    - name: Untrack files folder
-      ansible.builtin.command: git rm -r --cached files
-      args:
-        chdir: "{{ project_dir }}"
-      failed_when: false
-
-    - name: Init repo
-      ansible.builtin.command: git init
-      args:
-        chdir: "{{ project_dir }}"
-
-    - name: Configure git user
-      ansible.builtin.command: git config user.name Ansible-Deploy-Bot
-      args:
-        chdir: "{{ project_dir }}"
-      failed_when: false
-
-    - name: Add remote
-      ansible.builtin.shell: git remote remove origin 2> /dev/null; git remote add origin {{ github_repo }}
-      args:
-        chdir: "{{ project_dir }}"
-      failed_when: false
-
-    - name: Set branch main
-      ansible.builtin.command: git branch -M main
-      args:
-        chdir: "{{ project_dir }}"
-      failed_when: false
-
-    - name: Stage all files
+    - name: Stage all source files
       ansible.builtin.command: git add -A
       args:
         chdir: "{{ project_dir }}"
-      register: git_commit
-      failed_when: false
-      changed_when: git_commit.rc == 0
+      changed_when: true
 
-    - name: Push to Github
-      ansible.builtin.shell: git push -u origin main 2>&1
+    - name: Commit staged changes
+      # The message is read from a file when one is present. Passing it as
+      # -e commit_msg="words with spaces" does not survive the SSH/doas hop:
+      # the shell splits it and the commit lands with only the first word.
+      ansible.builtin.shell: |
+        MSGFILE="{{ project_dir }}/.commit-msg"
+        if git diff --cached --quiet; then
+          echo "NOTHING_TO_COMMIT"
+        elif [ -s "$MSGFILE" ]; then
+          git commit -F "$MSGFILE" | tail -3
+          rm -f "$MSGFILE"
+        else
+          git commit -m "{{ commit_msg }}" | tail -3
+        fi
       args:
         chdir: "{{ project_dir }}"
-      register: git_push
-      failed_when: false
+      register: commit
+      changed_when: "'NOTHING_TO_COMMIT' not in commit.stdout"
 
-    - name: Push verdict
-      ansible.builtin.debug:
-        msg: "{{ 'PUSH_FAILED - see output above' if git_push.rc !=0 else 'PUSH_OK' }}"
+    - name: Push to GitHub
+      # The token is handed to git through a short-lived askpass helper, not in
+      # the URL. Embedding it in the URL does not survive GitHub's redirect to
+      # the canonical repo path (the userinfo is stripped and git then prompts
+      # for a username), and it would also persist in .git/config.
+      ansible.builtin.shell: |
+        T=$(ansible-vault view "{{ project_dir }}/token.yml" \
+              --vault-password-file "{{ project_dir }}/.vault_pass" 2>/dev/null \
+            | sed -n 's/^github_token:[[:space:]]*//p' | tr -d '\r\n')
+        if [ -z "$T" ]; then echo "TOKEN_DECRYPT_FAILED"; exit 1; fi
+        A=$(mktemp /tmp/.lab-askpass.XXXXXX)
+        printf '#!/bin/sh\ncase "$1" in *[Uu]sername*) echo "x-access-token";; *) echo "%s";; esac\n' "$T" > "$A"
+        chmod 700 "$A"
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$A" git push -u origin main > /tmp/lab-push.log 2>&1
+        RC=$?
+        rm -f "$A"
+        sed -E "s#$T#<redacted>#g" /tmp/lab-push.log | tail -6
+        rm -f /tmp/lab-push.log
+        echo "PUSH_RC=$RC"
+        exit $RC
+      args:
+        chdir: "{{ project_dir }}"
+        executable: /bin/sh
+      register: git_push
+      no_log: true
+      changed_when: false
 
     - name: Result
       ansible.builtin.debug:
-        var: git_push
-
-    - name: Count tracked backups
-      ansible.builtin.command: git ls-files
-      args:
-        chdir: "{{ project_dir }}"
-      register: all_files
-      changed_when: false
-
-    - name: Show tracked file count
-      ansible.builtin.debug:
-        var: all_files.stdout_lines
+        msg: "{{ 'PUSH_OK' if 'PUSH_RC=0' in git_push.stdout else 'PUSH_FAILED' }}"

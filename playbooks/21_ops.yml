@@ -1,0 +1,83 @@
+---
+# Operations layer - deployed and run on the controller over SSH.
+#
+# Every command this playbook issues runs on the controller (localhost in the
+# lab's own Ansible context). Nothing is executed on the workstation: the SSH
+# session is the only management channel, and the dashboard container has no
+# shell or SSH client of its own.
+#
+#   ansible-playbook playbooks/21_ops.yml
+#
+# Idempotent: the installer skips cron lines that already exist and only seeds
+# status files that are missing or stale.
+- name: Controller operations - DNS, TLS, firewall, retention, backups
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    lab_dir: /root/lab
+    ops_src: "{{ playbook_dir }}/../files/ops"
+    # duckdns.env is deliberately NOT in this list. It holds a live credential
+    # and is seeded once with force:false below; a recursive copy would silently
+    # replace the operator's token with the empty template on every redeploy.
+    ops_scripts:
+      - acme-issue.sh
+      - backup-worker.sh
+      - duckdns-update.sh
+      - duckdns-setup.sh
+      - network-sync.sh
+      - tunnel-status.sh
+      - tunnel-install.sh
+      - lab-tunnel.initd
+      - fw-guard.sh
+      - ops-install.sh
+      - retention.sh
+      - snapshot.sh
+      - status.py
+      - retention.py
+
+  tasks:
+    - name: Install the operations scripts
+      ansible.builtin.copy:
+        src: "{{ ops_src }}/{{ item }}"
+        dest: "{{ lab_dir }}/ops/{{ item }}"
+        mode: "0755"
+      loop: "{{ ops_scripts }}"
+
+    - name: Install the operations documentation
+      ansible.builtin.copy:
+        src: "{{ ops_src }}/README.md"
+        dest: "{{ lab_dir }}/ops/README.md"
+        mode: "0644"
+
+    - name: Seed the DuckDNS config only when it does not exist yet
+      ansible.builtin.copy:
+        src: "{{ ops_src }}/duckdns.env"
+        dest: "{{ lab_dir }}/ops/duckdns.env"
+        mode: "0600"
+        force: false
+
+    - name: Make sure the credential file is never world-readable
+      ansible.builtin.file:
+        path: "{{ lab_dir }}/ops/duckdns.env"
+        mode: "0600"
+
+    - name: Wire cron and seed status
+      ansible.builtin.command: sh {{ lab_dir }}/ops/ops-install.sh
+      register: ops_install
+      changed_when: false
+
+    - name: Ensure the Cloudflare tunnel is running
+      # Only install/start when the service is missing or down. Re-running the
+      # installer on a healthy tunnel would restart it and change the URL.
+      ansible.builtin.shell: |
+        rc-service lab-tunnel status >/dev/null 2>&1 || sh {{ lab_dir }}/ops/tunnel-install.sh
+      args:
+        executable: /bin/sh
+      register: tunnel_boot
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ ops_install.stdout_lines }}"

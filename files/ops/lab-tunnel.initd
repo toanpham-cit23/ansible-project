@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+# Cloudflare Quick Tunnel. It dials outbound, so no inbound port forward and
+# no CGNAT workaround are needed - the whole reason this exists.
+#
+# The origin is HTTPS with the DuckDNS name, resolved to loopback by the
+# controller's /etc/hosts. That way cloudflared verifies the real certificate,
+# and the API still sees a TLS request (so cookies stay Secure and HSTS applies)
+# instead of being downgraded to plain HTTP.
+name="lab-tunnel"
+description="Cloudflare Quick Tunnel to the lab dashboard"
+
+command="/usr/local/bin/cloudflared"
+# Read the configured subdomain rather than hardcoding one, so changing the
+# DuckDNS name does not silently leave the tunnel pointed at an old origin.
+. /root/lab/ops/duckdns.env 2>/dev/null || DUCKDNS_DOMAIN=""
+ORIGIN="${DUCKDNS_DOMAIN}.duckdns.org"
+command_args="tunnel --no-autoupdate --url https://${ORIGIN}:8443"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/lab-tunnel.log"
+error_log="/var/log/lab-tunnel.log"
+
+depend() {
+	need net
+	after docker
+}
+
+start_pre() {
+	checkpath --file --mode 0644 /var/log/lab-tunnel.log
+}
