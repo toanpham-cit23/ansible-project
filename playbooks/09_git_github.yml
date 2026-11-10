@@ -65,9 +65,16 @@
       changed_when: true
 
     - name: Commit staged changes
+      # The message is read from a file when one is present. Passing it as
+      # -e commit_msg="words with spaces" does not survive the SSH/doas hop:
+      # the shell splits it and the commit lands with only the first word.
       ansible.builtin.shell: |
+        MSGFILE="{{ project_dir }}/.commit-msg"
         if git diff --cached --quiet; then
           echo "NOTHING_TO_COMMIT"
+        elif [ -s "$MSGFILE" ]; then
+          git commit -F "$MSGFILE" | tail -3
+          rm -f "$MSGFILE"
         else
           git commit -m "{{ commit_msg }}" | tail -3
         fi

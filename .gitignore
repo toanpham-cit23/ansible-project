@@ -61,6 +61,7 @@ files/ops/duckdns.env
 files/lab/*.db
 
 # --- runtime noise ---
+.commit-msg
 __pycache__/
 *.pyc
 dashboard.tar.gz
