@@ -645,7 +645,11 @@ func handleEvents(w http.ResponseWriter, r *http.Request, u *User) {
 
 func handleTopology(w http.ResponseWriter, r *http.Request, u *User) {
 	nodes := []map[string]any{}
-	nr, err := db.Query(`SELECT id, hostname, mgmt_ip, effective_kind, last_state FROM v_inventory`)
+	// protected travels with the node: the UI must not offer a Delete button on
+	// infrastructure, and the API must refuse the call even if it is forged.
+	nr, err := db.Query(`SELECT v.id, v.hostname, v.mgmt_ip, v.effective_kind, v.last_state,
+	                            COALESCE(d.protected,0)
+	                     FROM v_inventory v LEFT JOIN devices d ON d.id = v.id`)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
@@ -654,9 +658,10 @@ func handleTopology(w http.ResponseWriter, r *http.Request, u *User) {
 		var id int64
 		var host, ip, kind string
 		var state sql.NullString
-		if nr.Scan(&id, &host, &ip, &kind, &state) == nil {
+		var prot int
+		if nr.Scan(&id, &host, &ip, &kind, &state, &prot) == nil {
 			nodes = append(nodes, map[string]any{"id": id, "hostname": host, "mgmt_ip": ip,
-				"effective_kind": kind, "last_state": state.String})
+				"effective_kind": kind, "last_state": state.String, "protected": prot == 1})
 		}
 	}
 	nr.Close()
@@ -1207,9 +1212,10 @@ func main() {
 	defer db.Close()
 	ensureLogSchema()
 	ensureLabSchema()
-	ensureTelegramSchema()  // adds shift_admins.telegram + the Telegram ledger tables
-	ensureDiscoverySchema() // B.9 new-device ledger, fed from the poller's ip_leases
-	ensureStaffSchema()     // self-service roster requests from the Telegram group
+	ensureTelegramSchema()   // adds shift_admins.telegram + the Telegram ledger tables
+	ensureDiscoverySchema()  // B.9 new-device ledger, fed from the poller's ip_leases
+	ensureStaffSchema()      // self-service roster requests from the Telegram group
+	ensureDeviceProtection() // r1/r2/r3/controller must never be auto-deleted
 	bootstrap()
 
 	mux := http.NewServeMux()

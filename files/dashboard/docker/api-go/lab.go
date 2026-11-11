@@ -1638,9 +1638,17 @@ func handleDevicePool(w http.ResponseWriter, r *http.Request, u *User) {
 func handleDeleteDevice(w http.ResponseWriter, r *http.Request, u *User) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	var host string
-	_ = db.QueryRow("SELECT hostname FROM devices WHERE id = ?", id).Scan(&host)
+	var prot int
+	_ = db.QueryRow("SELECT hostname, COALESCE(protected,0) FROM devices WHERE id = ?", id).
+		Scan(&host, &prot)
 	if host == "" {
 		fail(w, http.StatusNotFound, "device not found")
+		return
+	}
+	// Infrastructure is protected. This is checked here and not only in the UI:
+	// a Delete button that is merely hidden is not a guarantee.
+	if prot == 1 {
+		fail(w, http.StatusConflict, "device is protected: "+host+" cannot be deleted")
 		return
 	}
 	if _, err := db.Exec("DELETE FROM devices WHERE id = ?", id); err != nil {

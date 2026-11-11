@@ -1588,10 +1588,12 @@ const views = {
         <td><span class="pill ${n.last_state === 'up' ? 'up' : 'down'}">${esc(n.last_state || 'unknown')}</span></td>
         <td>${issue ? xIcon(issue.sev, 'dev:' + n.id) : ''}</td>
         <td>${n.effective_kind === 'server' ? '' : `<button class="act" data-act="term" data-id="${n.id}">terminal</button>`}</td>
-        <td>${(n.effective_kind !== 'server' && n.last_state !== 'up')
-          ? `<button class="act danger" data-act="device-delete" data-id="${n.id}"
-                     data-who="${esc(n.hostname)}">Delete</button>`
-          : '<span class="muted" style="font-size:11.5px">protected</span>'}</td>
+        <td>${n.protected || n.effective_kind === 'server'
+          ? '<span class="muted" style="font-size:11.5px" title="infrastructure - never auto-deleted">protected</span>'
+          : (n.last_state !== 'up'
+            ? `<button class="act danger" data-act="device-delete" data-id="${n.id}"
+                       data-who="${esc(n.hostname)}">Delete</button>`
+            : '<span class="muted" style="font-size:11.5px">in use</span>')}</td>
       </tr>`;
       }).join('')}</tbody></table></div>`;
 

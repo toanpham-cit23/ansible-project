@@ -1108,7 +1108,10 @@ def cycle(c):
         # 180 s rule. A device we could never identify is not inventory; keeping
         # it forever just fills the page with question marks. It is removed and
         # announced, so nobody has to wonder where a box went.
-        if d["kind"] == "unknown":
+        # Protected rows are infrastructure. They may flap, but they are never
+        # removed by this rule - deleting a router because it was rebooted for
+        # three minutes would be an outage caused by the monitoring system.
+        if d["kind"] == "unknown" and not (("protected" in d.keys()) and d["protected"]):
             if state == "up":
                 DOWN_SINCE.pop(d["id"], None)
             else:

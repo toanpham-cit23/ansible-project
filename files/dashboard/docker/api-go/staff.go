@@ -12,6 +12,7 @@ package main
 // approves - the bot only verifies identity, it does not grant a shift.
 
 import (
+	"database/sql"
 	"net/http"
 	"strconv"
 	"strings"
@@ -39,6 +40,40 @@ func ensureStaffSchema() {
 			// A schema problem must not stop the dashboard from serving.
 			println("staff schema:", err.Error())
 		}
+	}
+}
+
+// ensureDeviceProtection adds devices.protected and, on the single run that
+// creates the column, marks everything already inventoried as protected.
+//
+// Why a one-shot migration rather than "protected = kind != 'unknown'": the
+// lab's fixed infrastructure is exactly what existed when this ran. Anything an
+// operator adds afterwards (the simulated nodes) stays deletable, which is the
+// behaviour the Nodes page promises. Re-running the UPDATE on every boot would
+// silently protect those simulated nodes too.
+func ensureDeviceProtection() {
+	var has bool
+	if rs, err := db.Query(`PRAGMA table_info(devices)`); err == nil {
+		for rs.Next() {
+			var cid int
+			var name, ctype string
+			var notnull, pk int
+			var dflt sql.NullString
+			if rs.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk) == nil && name == "protected" {
+				has = true
+			}
+		}
+		_ = rs.Close()
+	}
+	if has {
+		return
+	}
+	if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN protected INTEGER NOT NULL DEFAULT 0`); err != nil {
+		println("device protection:", err.Error())
+		return
+	}
+	if _, err := db.Exec(`UPDATE devices SET protected = 1`); err != nil {
+		println("device protection seed:", err.Error())
 	}
 }
 
