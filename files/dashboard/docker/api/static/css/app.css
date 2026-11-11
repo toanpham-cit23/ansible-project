@@ -110,7 +110,7 @@ table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 th { text-align: left; font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 500; padding: 9px 10px; border-bottom: 1px solid var(--line); }
 td { padding: 11px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 tbody tr:hover td { background: var(--panel2); }
-.pill { display: inline-block; padding: 2px 9px; border-radius: 9px; font-size: 11.5px; border: 1px solid var(--line); color: var(--muted); }
+.pill { display: inline-block; padding: 2px 9px; border-radius: 9px; font-size: 11.5px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
 .pill.up { color: var(--ok); border-color: var(--ok); }
 .pill.down { color: var(--err); border-color: var(--err); }
 /* a terminated connection is not the same as a host that happens to be quiet */
@@ -473,6 +473,13 @@ select.log-act {
    than the viewport: the sidebar already eats 208px. */
 #view table { table-layout: auto; }
 #view td, #view th { overflow-wrap: anywhere; }
+/* Task 3: "overflow-wrap: anywhere" let a narrow Status column split a word
+   ("Closed" -> "Close\nd"). Status cells opt out of wrapping entirely and are
+   centre-aligned; the ID selector is needed to beat #view td's specificity. */
+#view td.status-col, #view th.status-col {
+  white-space: nowrap; overflow-wrap: normal; word-break: normal;
+  text-align: center; width: 1%; vertical-align: middle;
+}
 .log-msg { max-width: 420px; word-break: break-word; }
 
 /* Inline rename field: it sits inside a cell and should not look like a form */
@@ -509,7 +516,16 @@ input.lease-name:focus { border-style: solid; border-color: var(--accent); outli
 .sb-item.ok i { background: var(--ok); }
 .sb-item.err i { background: var(--err); }
 .sb-item b { color: var(--ink); font-weight: 600; }
-.sb-more { margin-left: auto; color: var(--accent); font-size: 12px; white-space: nowrap; }
+/* The old top-right "Gap analysis →" link (.sb-more) is gone. It is replaced
+   by a Telegram login button available to every signed-in user; the admin-only
+   Bot Token stays in Settings (runbook 4.1d / 4.1c). */
+.sb-tg {
+  margin-left: auto; padding: 4px 11px; border-radius: 4px;
+  border: 1px solid var(--accent); background: transparent;
+  color: var(--accent); font: inherit; font-size: 12px; font-weight: 600;
+  white-space: nowrap; cursor: pointer;
+}
+.sb-tg:hover { background: var(--panel2); }
 
 .op-grid { display: grid; gap: 9px; grid-template-columns: repeat(auto-fit, minmax(268px, 1fr)); }
 .panel.op { padding: 11px 13px; }

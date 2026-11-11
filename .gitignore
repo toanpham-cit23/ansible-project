@@ -75,3 +75,37 @@ files/dashboard/db/certs/
 files/dashboard/db/ops/
 files/dashboard/db/outbox/
 files/dashboard/db/*.json
+
+# --- Telegram / alert secrets (runbook 4.5) ---
+# The bot token is either TELEGRAM_BOT_TOKEN in an untracked .env, or an
+# AES-GCM ciphertext inside net.db. Neither form belongs in git.
+telegram.env
+files/dashboard/db/telegram.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+secrets/
+credentials*.json
+service-account*.json
+*_token.txt
+*.pem.bak
+
+# --- logs, temp files and editor scratch ---
+*.log
+*.log.*
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+*.swo
+*~
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- generated reports are delivered from Downloads, not committed ---
+*.docx
+*.pdf.report
+

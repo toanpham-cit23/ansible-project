@@ -647,7 +647,8 @@ func handleReachability(w http.ResponseWriter, r *http.Request, u *User) {
 // handleShifts lists the roster plus who is on call right now.
 func handleShifts(w http.ResponseWriter, r *http.Request, u *User) {
 	rs, err := db.Query(`SELECT id, name, email, COALESCE(phone,''), role, days_mask,
-	                            starts_at, ends_at, sort_order, active
+	                            starts_at, ends_at, sort_order, active,
+	                            COALESCE(telegram,'')
 	                     FROM shift_admins ORDER BY active DESC, sort_order, id`)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
@@ -657,13 +658,13 @@ func handleShifts(w http.ResponseWriter, r *http.Request, u *User) {
 	out := []map[string]any{}
 	for rs.Next() {
 		var id, mask, order, active int64
-		var name, email, phone, role, starts, ends string
+		var name, email, phone, role, starts, ends, telegram string
 		if rs.Scan(&id, &name, &email, &phone, &role, &mask, &starts, &ends,
-			&order, &active) == nil {
+			&order, &active, &telegram) == nil {
 			out = append(out, map[string]any{"id": id, "name": name, "email": email,
 				"phone": phone, "role": role, "days_mask": mask,
 				"starts_at": starts, "ends_at": ends, "sort_order": order,
-				"active": active == 1,
+				"active": active == 1, "telegram": telegram,
 				"days":   maskToDays(mask)})
 		}
 	}
@@ -825,6 +826,7 @@ func handlePutShift(w http.ResponseWriter, r *http.Request, u *User) {
 		Name     string   `json:"name"`
 		Email    string   `json:"email"`
 		Phone    string   `json:"phone"`
+		Telegram string   `json:"telegram"` // Telegram @username for incident mentions
 		Role     string   `json:"role"`
 		Days     []string `json:"days"`
 		StartsAt string   `json:"starts_at"`
@@ -859,10 +861,16 @@ func handlePutShift(w http.ResponseWriter, r *http.Request, u *User) {
 	if b.Active != nil && !*b.Active {
 		active = 0
 	}
+	// Store the bare username. "@" is re-added when building a mention, so an
+	// operator pasting "@nguyenvana" cannot produce "@@nguyenvana".
+	telegram := strings.TrimPrefix(strings.TrimSpace(b.Telegram), "@")
+	if len(telegram) > 64 {
+		telegram = telegram[:64]
+	}
 	if b.ID > 0 {
-		_, err := db.Exec(`UPDATE shift_admins SET name=?, email=?, phone=?, role=?,
+		_, err := db.Exec(`UPDATE shift_admins SET name=?, email=?, phone=?, telegram=?, role=?,
 		                   days_mask=?, starts_at=?, ends_at=?, active=? WHERE id=?`,
-			b.Name, b.Email, b.Phone, role, mask, starts, ends, active, b.ID)
+			b.Name, b.Email, b.Phone, telegram, role, mask, starts, ends, active, b.ID)
 		if err != nil {
 			fail(w, http.StatusInternalServerError, err.Error())
 			return
@@ -870,9 +878,9 @@ func handlePutShift(w http.ResponseWriter, r *http.Request, u *User) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": b.ID})
 		return
 	}
-	res, err := db.Exec(`INSERT INTO shift_admins(name,email,phone,role,days_mask,
-	                     starts_at,ends_at,active) VALUES (?,?,?,?,?,?,?,?)`,
-		b.Name, b.Email, b.Phone, role, mask, starts, ends, active)
+	res, err := db.Exec(`INSERT INTO shift_admins(name,email,phone,telegram,role,days_mask,
+	                     starts_at,ends_at,active) VALUES (?,?,?,?,?,?,?,?,?)`,
+		b.Name, b.Email, b.Phone, telegram, role, mask, starts, ends, active)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return

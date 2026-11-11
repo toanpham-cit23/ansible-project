@@ -68,8 +68,24 @@ async function boot() {
     document.querySelectorAll('#ranges button').forEach((x) => x.classList.toggle('on', x === b));
     route();
   });
+  // The Telegram button lives in the persistent status bar, outside #view, so
+  // it needs its own delegated listener. It is visible to every signed-in user
+  // (self-service); the Bot Token itself stays admin-only (runbook 4.1d/4.1c).
+  $('#statusbar').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-act="tg-login"]');
+    if (!b) return;
+    try {
+      const s = await api.get('/api/telegram/status');
+      let target = s.login_url || '';
+      if (!s.linked) {
+        const l = await api.post('/api/telegram/link-token');
+        target = l.url || target;
+      }
+      if (!target) { toast('Admin chưa cấu hình Telegram Bot Username trong Settings', true); return; }
+      window.open(target, '_blank', 'noopener,noreferrer');
+    } catch (err) { toast(err.message, true); }
+  });
   $('#view').addEventListener('click', onClick);
-  $('#view').addEventListener('change', onChange);
   $('#view').addEventListener('change', onChange);
   $('#view').addEventListener('input', onInput);
   $('#view').addEventListener('keydown', onKey);
@@ -117,6 +133,57 @@ async function onClick(e) {
 
   const b = e.target.closest('button');
   if (!b) return;
+
+  // ---- Telegram incident alerts (server re-checks role on every write)
+  if (b.dataset.act === 'tg-save') {
+    try {
+      await api.put('/api/telegram/config', {
+        bot_token: ($('#tg-token') || {}).value || '',
+        chat_id: ($('#tg-chat') || {}).value || '',
+        bot_username: ($('#tg-bot') || {}).value || '',
+      });
+      toast('Telegram configuration saved; token encrypted at rest');
+      route();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  if (b.dataset.act === 'tg-test') {
+    try { await api.post('/api/telegram/test'); toast('Test alert sent to the Telegram group'); }
+    catch (err) { toast(err.message, true); }
+    return;
+  }
+  if (b.dataset.act === 'tg-alert') {
+    try {
+      const r = await api.post('/api/telegram/alert', {
+        rule: ($('#tg-rule') || {}).value || 'manual',
+        summary: ($('#tg-summary') || {}).value || '',
+      });
+      toast('Incident ' + r.code + ' sent');
+      route();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  if (b.dataset.act === 'tg-done') {
+    try {
+      await api.post('/api/telegram/incident', { code: b.dataset.code, status: 'fixed' });
+      toast('Incident marked as fixed');
+      route();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+
+  // ---- B.9 discovery ledger actions
+  if (b.dataset.act === 'disc-ack' || b.dataset.act === 'disc-ignore' ||
+      b.dataset.act === 'disc-reopen') {
+    const action = b.dataset.act === 'disc-ack' ? 'acknowledge'
+      : (b.dataset.act === 'disc-ignore' ? 'ignore' : 'reopen');
+    try {
+      await api.post('/api/discovery/action', { id: Number(b.dataset.id), action });
+      toast('Discovery record updated');
+      route();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
 
   if (b.dataset.page) {
     state.logPage = Number(b.dataset.page);
@@ -245,6 +312,7 @@ async function onClick(e) {
         ...(editing ? { id: editing } : {}),
         name: name.trim(), email: email.trim(),
         phone: ($('#sh-phone') || {}).value || '',
+        telegram: ($('#sh-telegram') || {}).value || '',
         role: ($('#sh-role') || {}).value || 'primary',
         starts_at: ($('#sh-start') || {}).value || '00:00',
         ends_at: ($('#sh-end') || {}).value || '23:59',
@@ -1601,9 +1669,67 @@ const views = {
       </div>`;
     }
 
+    // ---- Telegram incident alerts (runbook 4.1 / 4.5)
+    // Admin gets the self-input form; everyone else gets a read-only summary
+    // with no input, no button and no token value. The server also enforces
+    // 403 on PUT /api/telegram/config (4.1c defense in depth).
+    const t = await api.get('/api/telegram/status').catch(() => ({}));
+    const chip = (ok, label) => `<span class="chip ${ok ? 'chip-ok' : 'chip-warn'}">${label}</span>`;
+    const tgForm = admin ? `
+      <div class="panel" style="margin-top:9px">
+        <div class="p-title" style="text-align:left;margin-bottom:9px">Bot configuration (admin only)</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:9px">
+          <label class="muted" style="font-size:12px">Telegram Bot Token<br>
+            <input id="tg-token" type="password" autocomplete="off"
+                   placeholder="YOUR_BOT_TOKEN_HERE" style="width:100%;margin-top:4px"></label>
+          <label class="muted" style="font-size:12px">Group CHAT_ID<br>
+            <input id="tg-chat" placeholder="YOUR_CHAT_ID_HERE" style="width:100%;margin-top:4px"></label>
+          <label class="muted" style="font-size:12px">Bot username<br>
+            <input id="tg-bot" placeholder="YOUR_BOT_USERNAME_HERE" style="width:100%;margin-top:4px"></label>
+        </div>
+        <p class="muted" style="font-size:11.5px;margin-top:8px">
+          Để trống ô token để giữ nguyên; dán <span class="mono">YOUR_BOT_TOKEN_HERE</span> để xoá token đã lưu.
+          Giá trị thật lấy từ BotFather và chỉ nên đưa qua biến môi trường hoặc ô này.
+        </p>
+        <div class="row" style="margin-top:11px;justify-content:flex-end">
+          <button class="act" data-act="tg-test">Send test alert</button>
+          <button class="act primary" data-act="tg-save">Save configuration</button>
+        </div>
+      </div>` : '';
+    const tgBody = `
+      <div class="panel" style="padding:12px 14px">
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          ${chip(t.token_set, t.token_set ? 'Token configured (' + esc(t.token_source || 'set') + ')' : 'Token not configured')}
+          ${chip(t.chat_id_set, t.chat_id_set ? 'CHAT_ID configured' : 'CHAT_ID not configured')}
+          ${chip(!!t.bot_username, t.bot_username ? '@' + esc(t.bot_username) : 'Bot username not configured')}
+          ${chip((t.followers || []).length > 0, (t.followers || []).length + ' follower(s)')}
+        </div>
+        <p class="muted" style="font-size:12.5px;margin-top:9px">
+          <b>Join nhóm Telegram chung của team để nhận cảnh báo sự cố.</b>
+          Mỗi on-call admin tự khai báo <span class="mono">@username</span> trong
+          form <i>Add administrator</i>; hệ thống ping đúng người đang trực, và
+          chỉ ping toàn bộ follower khi không có ca trực. Telegram không có
+          <span class="mono">@all</span> tự nhiên.
+        </p>
+        <p class="muted" style="font-size:12px;margin-top:6px">
+          Bot token chỉ đọc từ env (<span class="mono">TELEGRAM_BOT_TOKEN</span>) hoặc
+          ô nhập của admin, được mã hoá AES-GCM trước khi lưu vào SQLite, không
+          ghi plaintext vào code/DB và không bao giờ trả về API đọc. Mọi cuộc
+          gọi tới Bot API dùng HTTPS. Telegram thay mail server cho
+          <b>cảnh báo nội bộ</b>; email giao dịch cho người dùng cuối vẫn dùng
+          luồng mail riêng của dashboard.
+        </p>
+        <p class="muted" style="font-size:12px;margin-top:6px">
+          ${t.linked ? 'Tài khoản của bạn đã liên kết @' + esc(t.telegram_username || '') + '.'
+                     : 'Bạn chưa liên kết Telegram — dùng nút ở góc phải trên màn hình.'}
+          ${t.env_override ? ' TELEGRAM_BOT_TOKEN từ env đang được ưu tiên.' : ''}
+        </p>
+      </div>` + tgForm;
+
     $('#view').innerHTML =
       section('appearance', 'Appearance', appearance, true) +
       section('account', 'Account', account, true) +
+      section('telegram', 'Telegram incident alerts', tgBody, true) +
       (admin ? section('users', 'Users', users, true) : '');
   },
 
@@ -1715,6 +1841,7 @@ const views = {
       <tr data-shift="${a.id}" class="${a.id === onId ? 'oncall' : ''}">
         <td><b>${esc(a.name)}</b>${a.id === onId ? ' <span class="chip chip-ok">on call</span>' : ''}${a.active ? '' : ' <span class="muted">(inactive)</span>'}</td>
         <td class="mono">${esc(a.email)}</td>
+        <td class="mono">${a.telegram ? '@' + esc(a.telegram) : '<span class="muted">—</span>'}</td>
         <td>${esc(a.role)}</td>
         <td class="mono">${esc(a.starts_at)}\u2013${esc(a.ends_at)}</td>
         <td class="mono" style="font-size:11.5px">${esc((a.days || []).join(' '))}</td>
@@ -1725,7 +1852,7 @@ const views = {
                        ${a.id === onId ? 'On call' : 'Make on-call'}</button>` : ''}
         </td>
       </tr>`).join('')
-      : `<tr><td colspan="6" class="muted" style="text-align:center;padding:22px">No administrators yet.</td></tr>`;
+      : `<tr><td colspan="7" class="muted" style="text-align:center;padding:22px">No administrators yet.</td></tr>`;
 
     const ed = state.shiftEdit ? d.admins.find((a) => a.id === Number(state.shiftEdit)) : null;
     const v = (k, fb) => esc(ed ? (ed[k] ?? fb) : fb);
@@ -1740,6 +1867,9 @@ const views = {
             <input id="sh-email" style="width:100%;margin-top:4px" value="${v('email', '')}"></label>
           <label class="muted" style="font-size:12px">Phone<br>
             <input id="sh-phone" style="width:100%;margin-top:4px" value="${v('phone', '')}"></label>
+          <label class="muted" style="font-size:12px">Telegram (@username)<br>
+            <input id="sh-telegram" placeholder="@username" style="width:100%;margin-top:4px"
+                   value="${v('telegram', '')}"></label>
           <label class="muted" style="font-size:12px">Role<br>
             <select id="sh-role" style="width:100%;margin-top:4px">
               <option value="primary"${ed && ed.role === 'backup' ? '' : ' selected'}>primary</option>
@@ -1764,7 +1894,7 @@ const views = {
     const body = banner + `
       <div class="panel" style="padding:4px 8px">
         <table>
-          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Hours</th>
+          <thead><tr><th>Name</th><th>Email</th><th>Telegram</th><th>Role</th><th>Hours</th>
             <th>Days</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -1774,6 +1904,13 @@ const views = {
         handover: use it when a shift changes early, or when someone works overtime and forgets to
         hand over \u2014 every unresolved alert is re-sent to the new person immediately. A handover
         stays in effect for ${esc(d.valid_h)} hours, after which the timetable above takes over again.
+      </p>
+      <p class="muted" style="font-size:12px;margin-top:6px">
+        <b>Join nhóm Telegram chung của team để nhận cảnh báo sự cố.</b>
+        Mỗi admin tự khai báo <span class="mono">@username</span> ở ô
+        <i>Telegram</i> và tự join group; hệ thống chỉ mention đúng người đang
+        trực (hoặc toàn bộ follower nếu không có ca trực). Bot không lấy được
+        danh sách thành viên group qua Bot API, nên roster là nguồn duy nhất.
       </p>` + form;
     $('#view').innerHTML = section('shifts', 'Shift roster and on-call', body, true);
     if (ed) {
@@ -1784,7 +1921,12 @@ const views = {
 
   // --------------------------------------------------------------- alerts
   async alerts() {
-    const d = await api.get('/api/alerts');
+    const [d, t, inc, tgDeliv] = await Promise.all([
+      api.get('/api/alerts'),
+      api.get('/api/telegram/status').catch(() => ({})),
+      api.get('/api/telegram/incidents').catch(() => ({ incidents: [] })),
+      api.get('/api/telegram/deliveries').catch(() => ({ deliveries: [] })),
+    ]);
     const admin = state.me.role === 'admin';
     const ST = { sent: 'chip-info', failed: 'chip-crit', suppressed: 'chip-warn', queued: 'chip-info' };
 
@@ -1840,7 +1982,54 @@ const views = {
         class="mono">.eml</span> file under <span class="mono">db/outbox/</span> on the
         controller, so the routing can be inspected even in an isolated lab.
       </p>`;
-    $('#view').innerHTML = section('alerts', 'Alert rules and delivery', body, true);
+
+    // Telegram is the new internal incident channel. Mail above stays for
+    // end-user transactional email - the two are not interchangeable.
+    const tgRows = (inc.incidents || []).map((x) => `
+      <tr>
+        <td class="mono">${esc(x.code)}</td>
+        <td>${esc(x.summary)}</td>
+        <td class="status-col"><span class="pill ${x.status === 'Đã sửa' ? 'up' : 'down'}">${esc(x.status)}</span></td>
+        <td class="muted">${esc(x.by_user || '—')}</td>
+        <td class="muted mono" style="font-size:11px">${esc(x.updated_at)}</td>
+        <td style="text-align:right">${admin && x.status !== 'Đã sửa'
+          ? `<button class="act" data-act="tg-done" data-code="${esc(x.code)}">Mark fixed</button>` : ''}</td>
+      </tr>`).join('');
+    const tgSection = section('telegram-channel', 'Telegram channel (internal alerts)', `
+      <div class="row" style="margin-bottom:9px;gap:10px;flex-wrap:wrap">
+        <span class="chip ${t.configured ? 'chip-ok' : 'chip-warn'}">${t.configured ? 'configured' : 'not configured'}</span>
+        <span class="muted" style="font-size:12.5px">${(t.followers || []).length} follower(s) ·
+          on-call mentioned first, else all followers · "Đang chờ lệnh" → "Đã sửa"</span>
+        ${admin ? '<span style="margin-left:auto"></span><button class="act" data-act="tg-test">Send test alert</button>' : ''}
+      </div>
+      <div class="panel" style="padding:4px 8px;margin-bottom:9px">
+        <table><thead><tr><th>Code</th><th>Summary</th><th class="status-col">Status</th>
+          <th>By</th><th>Updated</th><th></th></tr></thead>
+        <tbody>${tgRows || '<tr><td colspan="6" class="muted" style="text-align:center;padding:18px">No Telegram incidents yet.</td></tr>'}</tbody></table>
+      </div>
+      ${admin ? `<div class="panel" style="padding:10px 12px">
+        <div class="p-title" style="text-align:left;margin-bottom:8px">Raise an incident</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:9px">
+          <label class="muted" style="font-size:12px">Rule<br>
+            <input id="tg-rule" value="manual" style="width:100%;margin-top:4px"></label>
+          <label class="muted" style="font-size:12px">Summary<br>
+            <input id="tg-summary" placeholder="[AVERAGE] r1: Device unreachable — 3 alert đang mở"
+                   style="width:100%;margin-top:4px"></label>
+        </div>
+        <div class="row" style="margin-top:10px;justify-content:flex-end">
+          <button class="act primary" data-act="tg-alert">Send alert</button>
+        </div>
+      </div>` : ''}
+      <p class="muted" style="font-size:12px;margin-top:9px">
+        Telegram thay mail server cho <b>cảnh báo sự cố nội bộ</b>: push tức thì,
+        không cần domain/DNS/SPF/DKIM, miễn phí. Bảng mail ở trên vẫn phục vụ
+        email giao dịch cho người dùng cuối. Thiếu token hoặc CHAT_ID thì API
+        trả lỗi rõ ràng, không crash.
+        ${(tgDeliv.deliveries || []).length
+          ? ' Lần gửi gần nhất: ' + esc(tgDeliv.deliveries[0].status) + ' · ' + esc(tgDeliv.deliveries[0].ts) : ''}
+      </p>`, true);
+
+    $('#view').innerHTML = section('alerts', 'Alert rules and delivery', body, true) + tgSection;
   },
 
   // ---------------------------------------------------------- log analysis
@@ -1895,6 +2084,97 @@ const views = {
         single problem rather than a hundred notifications.
       </p>`;
     $('#view').innerHTML = section('analysis', 'Automated log analysis', body, true);
+  },
+
+  // ------------------------------------------------------- B.9 discovery
+  // HONEST HISTORY: the "Discovery" nav entry used to point at #/setup, whose
+  // content is devices + OSPF link proposals + DNS (and, on the older build,
+  // a copy of the Dashboard with CPU/disk gauges, cleanup drills and a command
+  // console). There was NO presentation for newly seen hosts. This view is
+  // that missing layer: it reads only what poller.py actually collects, and
+  // states plainly what is still not implemented.
+  async discovery() {
+    const d = await api.get('/api/discovery').catch(() => ({}));
+    const admin = state.me.role === 'admin';
+    const rows = d.candidates || [];
+    const c = d.counts || {};
+
+    const table = rows.length ? rows.map((x) => `
+      <tr>
+        <td class="mono"><b>${esc(x.mac)}</b></td>
+        <td class="mono">${esc(x.ip)}</td>
+        <td>${esc(x.device_name || x.hostname || '—')}</td>
+        <td class="muted">${esc(x.vendor || 'unknown OUI')}</td>
+        <td class="mono" style="font-size:11.5px">${esc(x.seen_on || '—')}${x.if_name ? ' / ' + esc(x.if_name) : ''}</td>
+        <td class="mono" style="font-size:11.5px">${esc(x.first_seen)}</td>
+        <td class="status-col"><span class="pill ${x.state === 'acknowledged' ? 'up' : (x.state === 'ignored' ? 'down' : 'err')}">${esc(x.state)}</span></td>
+        <td class="status-col">${x.online ? '<span class="pill up">online</span>' : '<span class="pill down">offline</span>'}</td>
+        <td style="text-align:right">${admin ? `
+          <button class="act" data-act="disc-ack" data-id="${x.id}">Acknowledge</button>
+          <button class="act" data-act="disc-ignore" data-id="${x.id}">Ignore</button>` : ''}</td>
+      </tr>`).join('')
+      : `<tr><td colspan="9" class="muted" style="text-align:center;padding:22px">
+           No unknown device observed yet. A new IP/MAC pair seen in a router ARP
+           table and absent from the inventory will appear here automatically.</td></tr>`;
+
+    const events = (d.events || []).length
+      ? (d.events || []).map((e) => `<div class="feed-row">
+           <span class="muted mono" style="font-size:11.5px">${esc(e.ts)}</span>
+           <span class="mono">${esc(e.ip)}</span>
+           <span class="mono muted">${esc(e.mac)}</span>
+           <span class="muted">${esc(e.detail || 'new binding')}</span></div>`).join('')
+      : '<p class="muted" style="font-size:12.5px">No appearance/move events recorded yet.</p>';
+
+    const src = (d.sources || []).map((s) => `<li>${esc(s)}</li>`).join('');
+    const lim = (d.limitations || []).map((s) => `<li>${esc(s)}</li>`).join('');
+
+    const body = `
+      <div class="panel" style="padding:12px 14px;margin-bottom:10px">
+        <b>B.9 — New device discovery</b>
+        <span class="muted" style="font-size:12.5px">
+          Passive detection of hosts newly plugged into the lab network, recorded
+          into the <span class="mono">discovered_devices</span> ledger.
+          <b>${c.unknown || 0}</b> unknown · <b>${c.new || 0}</b> new ·
+          <b>${c.acknowledged || 0}</b> acknowledged · <b>${c.ignored || 0}</b> ignored ·
+          <b>${c.known_inventory || 0}</b> already in inventory
+          (ledger ${c.ledger || 0}).
+          ${d.sync && d.sync !== 'ok' ? '<span class="chip chip-crit">' + esc(d.sync) + '</span>' : ''}
+        </span>
+      </div>
+      <div class="panel" style="padding:4px 8px">
+        <table>
+          <thead><tr><th>MAC</th><th>IP</th><th>Name</th><th>Vendor (OUI)</th>
+            <th>Seen on</th><th>First seen</th><th class="status-col">State</th>
+            <th class="status-col">Live</th><th></th></tr></thead>
+          <tbody>${table}</tbody>
+        </table>
+      </div>
+      <div class="grid" style="margin-top:11px">
+        <div class="panel" style="padding:12px 14px">
+          <div class="p-title" style="text-align:left">What actually feeds this view</div>
+          <ul class="gap-recs">${src}</ul>
+          <p class="muted" style="font-size:12px;margin-top:8px">
+            Không còn hiển thị CPU/disk/memory, cleanup drill hay command console
+            ở trang Discovery — đó là nội dung Dashboard bị lặp lại trước đây.
+            Để quản lý thiết bị / DNS / OSPF link proposals, dùng
+            <a href="#/setup">Setup</a>.
+          </p>
+        </div>
+        <div class="panel" style="padding:12px 14px">
+          <div class="p-title" style="text-align:left">Still partial — not implemented</div>
+          <ul class="gap-recs">${lim}</ul>
+          <p class="muted" style="font-size:12px;margin-top:8px">
+            Ghi nhận vào ledger là tự động; việc đưa thiết bị vào inventory vẫn
+            do admin thực hiện. Các nút Acknowledge / Ignore chỉ hiển thị với
+            <span class="mono">admin</span> và được kiểm tra lại ở server (403).
+          </p>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:11px;padding:12px 14px">
+        <div class="p-title" style="text-align:left;margin-bottom:8px">Recent appearance timeline</div>
+        ${events}
+      </div>`;
+    $('#view').innerHTML = section('discovery', 'New device discovery (B.9)', body, true);
   },
 
   // ---------------------------------------------------------------- setup
@@ -2056,7 +2336,7 @@ const views = {
       <td><b>${esc(x.area)}</b></td>
       <td class="muted">${esc(x.before)}</td>
       <td>${esc(x.after)}</td>
-      <td><span class="pill ${x.status === 'closed' ? 'up' : (x.status === 'blocked' ? 'err' : 'down')}">${esc(x.status)}</span></td>
+      <td class="status-col"><span class="pill ${x.status === 'closed' ? 'up' : (x.status === 'blocked' ? 'err' : 'down')}">${esc(x.status).replace(/^./, (ch) => ch.toUpperCase())}</span></td>
       <td class="muted mono" style="font-size:11px">${esc(x.evidence)}</td>
     </tr>`).join('');
     const body = `
@@ -2068,7 +2348,7 @@ const views = {
         than marked done.</span>
       </div>
       <div class="panel"><table>
-        <thead><tr><th>Area</th><th>Before</th><th>After</th><th>Status</th><th>Evidence</th></tr></thead>
+        <thead><tr><th>Area</th><th>Before</th><th>After</th><th class="status-col">Status</th><th>Evidence</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
       <div class="panel" style="margin-top:10px;padding:12px 14px">
         <div class="p-title">Further recommendations</div>
@@ -2153,13 +2433,17 @@ function sbItem(label, ok, text, tip) {
 async function renderStatusbar() {
   const el = $('#statusbar');
   if (!el) return;
-  let d;
+  let d, tg;
   try {
-    d = await api.get('/api/ops');
+    [d, tg] = await Promise.all([
+      api.get('/api/ops'),
+      api.get('/api/telegram/status').catch(() => ({})),
+    ]);
   } catch (err) {
     el.innerHTML = '<span class="sb-item err"><i></i>Operations status unavailable</span>';
     return;
   }
+  tg = tg || {};
   const duck = d.duckdns || {}, tls = d.tls || {}, fw = d.firewall || {}, bk = d.backup || {};
   const tun = d.cloudflared || {};
   const duckOk = duck.ok === true ? true : (duck.state === 'unconfigured' ? null : false);
@@ -2176,7 +2460,12 @@ async function renderStatusbar() {
     sbItem('SQLite', true, d.db_size || '—', 'Database file size on the controller'),
     sbItem('Backups', bk.ok === true ? true : null, bk.last_snapshot || 'none', bk.message),
     sbItem('Next clearance', true, d.next_clearance || '—', '1 Jan / 1 Jul at 03:00 UTC'),
-    '<a class="sb-more" href="#/gapanalysis">Gap analysis →</a>',
+    // Replaces the old top-right "Gap analysis →" link (task 3). The label
+    // follows the linked Telegram account; the deep link is created
+    // server-side, single-use, and only over https://t.me/.
+    `<button class="sb-tg" data-act="tg-login" type="button"
+       title="${esc(tg.linked ? 'Mở bot Telegram' : 'Liên kết tài khoản Telegram')}">
+       ${tg.linked ? 'Login as @' + esc(tg.telegram_username || '') : 'Login to Telegram'}</button>`,
   ].join('');
 }
 
@@ -2190,7 +2479,10 @@ function route() {
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
-  $('#title').textContent = name[0].toUpperCase() + name.slice(1);
+  // Route names are single words, so the old naive capitalisation produced
+  // "Gapanalysis". Multi-word labels are mapped explicitly (task 3).
+  const TITLES = { gapanalysis: 'Gap analysis', discovery: 'Discovery' };
+  $('#title').textContent = TITLES[name] || (name[0].toUpperCase() + name.slice(1));
   $('#ranges').style.display = name === 'dashboard' ? '' : 'none';
 
   fn().catch((e) => { $('#view').innerHTML = `<p class="err">${esc(e.message)}</p>`; });
@@ -2201,7 +2493,7 @@ function route() {
   // 5 s interval only shows up in the logs.
   const every5 = name === 'dashboard'
     ? state.range === 'live'
-    : (name === 'monitoring' || name === 'leases');
+    : (name === 'monitoring' || name === 'leases' || name === 'discovery');
   if (every5) {
     state.timer = setInterval(() => {
       // never yank the fault panel out from under someone reading it

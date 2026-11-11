@@ -1176,6 +1176,8 @@ func main() {
 	defer db.Close()
 	ensureLogSchema()
 	ensureLabSchema()
+	ensureTelegramSchema() // adds shift_admins.telegram + the Telegram ledger tables
+	ensureDiscoverySchema() // B.9 new-device ledger, fed from the poller's ip_leases
 	bootstrap()
 
 	mux := http.NewServeMux()
@@ -1248,6 +1250,24 @@ func main() {
 	mux.HandleFunc("POST /api/ops/snapshot", withAdmin(handleOpsSnapshot))
 	mux.HandleFunc("POST /api/ops/retention", withAdmin(handleOpsRetention))
 
+	// ---- B.9 new device discovery (poller ARP data -> ledger)
+	mux.HandleFunc("GET /api/discovery", withUser(handleDiscovery))
+	mux.HandleFunc("POST /api/discovery/action", withAdmin(handleDiscoveryAction))
+
+	// ---- Telegram incident alerts. Reads are for any signed-in user; every
+	// write is admin-only. The frontend hides the controls too, but this is the
+	// real boundary (defense in depth, runbook 4.1c).
+	mux.HandleFunc("GET /api/telegram/status", withUser(handleTelegramStatus))
+	mux.HandleFunc("GET /api/telegram/followers", withUser(handleTelegramFollowers))
+	mux.HandleFunc("GET /api/telegram/incidents", withUser(handleTelegramIncidents))
+	mux.HandleFunc("GET /api/telegram/deliveries", withUser(handleTelegramDeliveries))
+	mux.HandleFunc("PUT /api/telegram/config", withAdmin(handleTelegramConfig))
+	mux.HandleFunc("POST /api/telegram/auth", withUser(handleTelegramAuth))
+	mux.HandleFunc("POST /api/telegram/link-token", withUser(handleTelegramLinkToken))
+	mux.HandleFunc("POST /api/telegram/test", withAdmin(handleTelegramTest))
+	mux.HandleFunc("POST /api/telegram/alert", withAdmin(handleTelegramAlert))
+	mux.HandleFunc("POST /api/telegram/incident", withAdmin(handleTelegramIncident))
+
 	noStore := func(p string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store, max-age=0")
@@ -1296,6 +1316,11 @@ func main() {
 	// optional: the same records that back the UI can be served as a real
 	// zone, so http://lab.local:8080 works without /etc/hosts
 	startDNS()
+
+	// Background long-polling for /start, /follow and /done. It idles when no
+	// token is configured and only ever makes outbound HTTPS calls - no new
+	// public listener or webhook is opened for it.
+	startTelegramPoller()
 
 	log.Println("listening on :8000")
 	log.Fatal(srv.ListenAndServe())
