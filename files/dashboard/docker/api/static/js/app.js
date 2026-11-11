@@ -132,6 +132,11 @@ async function onChange(e) {
     } catch (err) { markTg('', false); }
     return;
   }
+  // The monitoring page redraws every 5 s. Without this the half-typed name is
+  // wiped mid-keystroke, which is exactly the "text disappears" bug.
+  if (e.target.id === 'nd-name') { state.ndName = e.target.value; return; }
+  if (e.target.id === 'nd-ip') { state.ndIp = e.target.value; return; }
+  if (e.target.id === 'nd-kind') { state.ndKind = e.target.value; return; }
   if (e.target.id === 'log-cat') {
     state.logCat = e.target.value; state.logPage = 1; route(); return;
   }
@@ -394,6 +399,7 @@ async function onClick(e) {
     if (!ip) { toast('No free address left in the pool', true); return; }
     try {
       await api.post('/api/devices', { hostname: name, mgmt_ip: ip, kind });
+      state.ndName = ''; state.ndIp = ''; state.ndKind = 'router';
       toast('Node ' + name + ' added at ' + ip);
       route();
     } catch (err) { toast(err.message, true); }
@@ -812,8 +818,15 @@ function edgeOf(cx, cy, w, h, tx, ty) {
 }
 
 function labTopology(t, leases) {
-  const ctrl = t.nodes.find((n) => n.effective_kind === 'server');
-  const routers = t.nodes.filter((n) => n.effective_kind !== 'server' && n.effective_kind !== 'switch');
+  // Pick the controller by name first. A second server added for testing would
+  // otherwise be found first (lower id) and hijack the whole diagram's centre.
+  const ctrl = t.nodes.find((n) => n.hostname === 'controller')
+    || t.nodes.find((n) => n.effective_kind === 'server');
+  // Everything that is not the controller is drawn in the middle row, switches
+  // included. A switch added by hand has no designed trunk, so it hangs off
+  // nothing but the controller poll - which is exactly what "added as a test
+  // node" means. Filtering switches out here made them invisible.
+  const routers = t.nodes.filter((n) => n.id !== (ctrl && ctrl.id));
 
   // A router's own management address shows up in its neighbours' ARP tables,
   // so without this the diagram draws r1, r2, r3 and the controller a second
@@ -1561,15 +1574,16 @@ const views = {
       <div class="p-title" style="text-align:left;margin-bottom:8px">Add a node</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:9px">
         <label class="muted" style="font-size:12px">Name<br>
-          <input id="nd-name" placeholder="lab-pc-01" style="width:100%;margin-top:4px"></label>
+          <input id="nd-name" placeholder="lab-pc-01" autocomplete="off"
+                 style="width:100%;margin-top:4px" value="${esc(state.ndName || '')}"></label>
         <label class="muted" style="font-size:12px">Address<br>
           <select id="nd-ip" style="width:100%;margin-top:4px">
-            ${(pool.ips || []).map((ip) => `<option value="${ip}">${ip}</option>`).join('') || '<option value="">no free address</option>'}
+            ${(pool.ips || []).map((ip) => `<option value="${ip}"${ip === state.ndIp ? ' selected' : ''}>${ip}</option>`).join('') || '<option value="">no free address</option>'}
           </select></label>
         <label class="muted" style="font-size:12px">Class<br>
           <select id="nd-kind" style="width:100%;margin-top:4px">
-            <option value="router">router</option><option value="switch">switch</option>
-            <option value="l3switch">l3switch</option><option value="server">server</option>
+            ${['router', 'switch', 'l3switch', 'server'].map((k) =>
+              `<option value="${k}"${(state.ndKind || 'router') === k ? ' selected' : ''}>${k}</option>`).join('')}
           </select></label>
       </div>
       <div class="row" style="margin-top:10px;justify-content:flex-end">
