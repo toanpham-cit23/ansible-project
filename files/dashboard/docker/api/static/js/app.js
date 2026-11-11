@@ -1357,7 +1357,9 @@ const views = {
       // This card IS the controller. A TCP/22 probe of the host from inside
       // its own container says nothing useful, and opening a terminal to the
       // box running the dashboard is not an operation we want one click away.
-      const isLocal = (ssh && ssh.kind === 'server') || d.hostname === 'controller';
+      // "server" is a class, not a location: a test server added at .5 is a
+      // remote box. Only the host named controller is this machine.
+      const isLocal = d.hostname === 'controller';
       const badge = isLocal
         ? '<span class="ssh-chip local" title="This is the machine running the dashboard">Local host</span>'
         : `<span class="ssh-chip ${sshUp ? 'ok' : 'err'}" title="TCP/22 probe from the controller${ssh ? ' · ' + ssh.ssh_probe_ms + ' ms' : ''}">SSH ${sshUp ? 'up' : 'down'}</span>`;
@@ -1600,9 +1602,12 @@ const views = {
         return `<tr${issue ? ' class="cut"' : ''}>
         <td><b>${esc(n.hostname)}</b></td><td class="mono">${esc(n.mgmt_ip)}</td><td>${esc(n.effective_kind)}</td>
         <td><span class="pill ${n.last_state === 'up' ? 'up' : 'down'}">${esc(n.last_state || 'unknown')}</span></td>
-        <td>${issue ? xIcon(issue.sev, 'dev:' + n.id) : ''}</td>
+        <td>${issue ? xIcon(issue.sev, 'dev:' + n.id)
+          : ((n.last_state && n.last_state !== 'up')
+            ? '<span class="chip chip-warn" title="Not answering - no health data">!</span>'
+            : '')}</td>
         <td>${n.effective_kind === 'server' ? '' : `<button class="act" data-act="term" data-id="${n.id}">terminal</button>`}</td>
-        <td>${n.protected || n.effective_kind === 'server'
+        <td>${n.protected
           ? '<span class="muted" style="font-size:11.5px" title="infrastructure - never auto-deleted">protected</span>'
           : (n.last_state !== 'up'
             ? `<button class="act danger" data-act="device-delete" data-id="${n.id}"

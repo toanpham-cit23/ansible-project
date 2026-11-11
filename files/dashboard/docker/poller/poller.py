@@ -674,7 +674,7 @@ def collect_logs(c, devs, patterns):
         return 0
     found = 0
     for d in devs:
-        if d["kind"] == "server":
+        if d["kind"] == "server" and d["hostname"] == "controller":
             continue    # the controller logs are the poller's own
         uname = d["username"] if "username" in d.keys() and d["username"] else "root"
         blob = d["password_enc"] if "password_enc" in d.keys() else None
@@ -1014,7 +1014,10 @@ def cycle(c):
     unanswered = []
 
     for d in devs:
-        if d["kind"] == "server":
+        # Only the host running this poller may read /proc/uptime. Treating
+        # every kind='server' row as local made an added test server report
+        # "up" forever, because its "uptime" was the controller's.
+        if d["kind"] == "server" and d["hostname"] == "controller":
             # the controller monitors itself; no SNMP daemon required
             try:
                 up_s = int(float(open("/proc/uptime").read().split()[0]))
@@ -1066,7 +1069,7 @@ def cycle(c):
                    m.get("cpu_pct"), m.get("mem_pct"), m.get("disk_pct"),
                    m.get("net_in_bps"), m.get("net_out_bps")))
 
-        if d["kind"] != "server":
+        if not (d["kind"] == "server" and d["hostname"] == "controller"):
             c.execute("INSERT INTO reach_samples(device_id, reachable, rtt_ms) VALUES (?,?,?)",
                       (d["id"], 1 if state == "up" else 0, rtt))
 
@@ -1084,7 +1087,7 @@ def cycle(c):
                     new_events.append(ev2)
 
         # uptime went backwards => the box restarted
-        if up_s is not None and d["kind"] != "server":
+        if up_s is not None and not (d["kind"] == "server" and d["hostname"] == "controller"):
             prev = UPTIME.get(d["id"])
             if prev is not None and up_s + REBOOT_DROP_S < prev:
                 g = gap if gap is not None else 0
@@ -1182,7 +1185,8 @@ def cycle(c):
     except Exception as e:
         print("alert error:", e, flush=True)
 
-    if len(unanswered) == len([d for d in devs if d["kind"] != "server"]) and devs:
+    if len(unanswered) == len([d for d in devs
+                               if not (d["kind"] == "server" and d["hostname"] == "controller")]) and devs:
         ev = emit(c, None, "disaster", "ALL %d devices unreachable" % len(devs))
         if ev:
             new_events.append(ev)
