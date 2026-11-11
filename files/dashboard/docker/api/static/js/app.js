@@ -1584,7 +1584,7 @@ const views = {
           </select></label>
         <label class="muted" style="font-size:12px">Class<br>
           <select id="nd-kind" style="width:100%;margin-top:4px">
-            ${['router', 'switch', 'l3switch', 'server'].map((k) =>
+            ${['router', 'switch', 'l3switch'].map((k) =>
               `<option value="${k}"${(state.ndKind || 'router') === k ? ' selected' : ''}>${k}</option>`).join('')}
           </select></label>
       </div>
