@@ -2,21 +2,21 @@
 //
 // Audit notes, kept in the source so the team can check the claims:
 //
-//   * Only the Go stdlib is used (net/http, crypto/*). Every Bot API call
+//   - Only the Go stdlib is used (net/http, crypto/*). Every Bot API call
 //     goes to https://api.telegram.org - there is no plain-HTTP path and no
 //     publicly reachable webhook endpoint (we long-poll from the backend).
-//   * NO secret is hardcoded. TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (or
+//   - NO secret is hardcoded. TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID (or
 //     CHAT_ID) / TELEGRAM_BOT_USERNAME come from the environment. A token
 //     pasted by an admin in Settings is AES-GCM encrypted before it reaches
 //     SQLite and is NEVER returned by any read endpoint (only a boolean and
 //     a masked marker). Placeholders such as YOUR_BOT_TOKEN_HERE are treated
 //     as "not configured".
-//   * Telegram has no native @all. BuildAlert mentions the on-call admin
+//   - Telegram has no native @all. BuildAlert mentions the on-call admin
 //     first; only when nobody is on call does it fan out to every follower
 //     recorded from /start or the Login Widget (see runbook 4.3 / 4.3b).
-//   * Every write route is wrapped in withAdmin in main.go. Hiding buttons in
+//   - Every write route is wrapped in withAdmin in main.go. Hiding buttons in
 //     the UI is cosmetic; the server check is the actual boundary (4.1c).
-//   * Telegram replaces the mail server for INTERNAL incident alerts only.
+//   - Telegram replaces the mail server for INTERNAL incident alerts only.
 //     dashboard/docker/api/app.py (Mailpit/Gmail/Resend) remains the path for
 //     end-user transactional mail. They are not interchangeable.
 package main
@@ -300,15 +300,19 @@ func verifyTelegramAuth(fields map[string]string, token string) bool {
 	if token == "" || fields["hash"] == "" {
 		return false
 	}
-	if ad, ok := fields["auth_date"]; ok {
-		sec, err := strconv.ParseInt(ad, 10, 64)
-		if err != nil {
-			return false
-		}
-		age := time.Since(time.Unix(sec, 0))
-		if age > 24*time.Hour || age < -5*time.Minute {
-			return false
-		}
+	// auth_date is mandatory: without it a valid signature could be replayed
+	// forever. Reject anything older than 24 h (or implausibly in the future).
+	ad, ok := fields["auth_date"]
+	if !ok {
+		return false
+	}
+	sec, err := strconv.ParseInt(ad, 10, 64)
+	if err != nil {
+		return false
+	}
+	age := time.Since(time.Unix(sec, 0))
+	if age > 24*time.Hour || age < -5*time.Minute {
+		return false
 	}
 	keys := make([]string, 0, len(fields))
 	for k := range fields {
@@ -575,6 +579,27 @@ func handleTelegramLinkToken(w http.ResponseWriter, r *http.Request, u *User) {
 	})
 }
 
+// consumeLinkToken redeems a deep-link token atomically. The conditional
+// UPDATE is the gate: a replay sees zero affected rows and is rejected even if
+// two /start messages arrive in the same instant.
+func consumeLinkToken(token string) (int64, bool) {
+	res, err := db.Exec(`UPDATE telegram_link_tokens SET used = 1
+	                     WHERE token = ? AND used = 0 AND expires_at > datetime('now')`, token)
+	if err != nil {
+		return 0, false
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n != 1 {
+		return 0, false
+	}
+	var uid int64
+	if db.QueryRow(`SELECT user_id FROM telegram_link_tokens WHERE token = ?`, token).
+		Scan(&uid) != nil {
+		return 0, false
+	}
+	return uid, true
+}
+
 // POST /api/telegram/test - the runbook's 4.4 smoke test, callable by an admin.
 func handleTelegramTest(w http.ResponseWriter, r *http.Request, u *User) {
 	members := []string{}
@@ -774,12 +799,7 @@ func tgHandleCommand(text string, telegramID int64, username string, chatID int6
 		}
 		if cmd == "/start" && len(parts) > 1 {
 			link := parts[1]
-			var uid int64
-			err := db.QueryRow(`SELECT user_id FROM telegram_link_tokens
-			                    WHERE token = ? AND used = 0 AND expires_at > datetime('now')`, link).
-				Scan(&uid)
-			if err == nil {
-				_, _ = db.Exec(`UPDATE telegram_link_tokens SET used = 1 WHERE token = ?`, link)
+			if uid, ok := consumeLinkToken(link); ok {
 				_, _ = db.Exec(`INSERT INTO telegram_users(user_id, telegram_id, username, followed, linked_at)
 				                VALUES (?,?,?,1,datetime('now'))
 				                ON CONFLICT(user_id) DO UPDATE SET telegram_id = excluded.telegram_id,
@@ -787,7 +807,7 @@ func tgHandleCommand(text string, telegramID int64, username string, chatID int6
 					uid, sid, username)
 				if chatID != 0 {
 					_ = sendMessage(strconv.FormatInt(chatID, 10),
-						"✅ Đã liên kết tài khoản dashboard với @" + username + ". Bạn sẽ nhận cảnh báo sự cố.", "")
+						"✅ Đã liên kết tài khoản dashboard với @"+username+". Bạn sẽ nhận cảnh báo sự cố.", "")
 				}
 			}
 		}

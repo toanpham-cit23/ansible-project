@@ -297,19 +297,19 @@ func rateClear(ip string) {
 // ---------------------------------------------------------------- models
 
 type Device struct {
-	ID             int64    `json:"id"`
-	Hostname       string   `json:"hostname"`
-	MgmtIP         string   `json:"mgmt_ip"`
-	EffectiveKind  string   `json:"effective_kind"`
-	KindConfidence float64  `json:"kind_confidence"`
-	Vendor         *string  `json:"vendor"`
-	Model          *string  `json:"model"`
-	AssetTag       *string  `json:"asset_tag"`
-	Site           string   `json:"site"`
-	LastSeen       *string  `json:"last_seen"`
-	LastState      *string  `json:"last_state"`
-	SSHPort        int      `json:"ssh_port"`
-	TelnetPort     int      `json:"telnet_port"`
+	ID             int64   `json:"id"`
+	Hostname       string  `json:"hostname"`
+	MgmtIP         string  `json:"mgmt_ip"`
+	EffectiveKind  string  `json:"effective_kind"`
+	KindConfidence float64 `json:"kind_confidence"`
+	Vendor         *string `json:"vendor"`
+	Model          *string `json:"model"`
+	AssetTag       *string `json:"asset_tag"`
+	Site           string  `json:"site"`
+	LastSeen       *string `json:"last_seen"`
+	LastState      *string `json:"last_state"`
+	SSHPort        int     `json:"ssh_port"`
+	TelnetPort     int     `json:"telnet_port"`
 }
 
 const deviceSQL = `SELECT d.id, d.hostname, d.mgmt_ip,
@@ -953,7 +953,6 @@ func truncate(s string, n int) string {
 	return s[:n]
 }
 
-
 // ---------------------------------------------------------------- logs
 
 // sigOf identifies an event class: same device + severity + message means the
@@ -1176,7 +1175,7 @@ func main() {
 	defer db.Close()
 	ensureLogSchema()
 	ensureLabSchema()
-	ensureTelegramSchema() // adds shift_admins.telegram + the Telegram ledger tables
+	ensureTelegramSchema()  // adds shift_admins.telegram + the Telegram ledger tables
 	ensureDiscoverySchema() // B.9 new-device ledger, fed from the poller's ip_leases
 	bootstrap()
 

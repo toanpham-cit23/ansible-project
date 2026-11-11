@@ -395,7 +395,7 @@ func handleLeases(w http.ResponseWriter, r *http.Request, u *User) {
 			"online": on == 1, "first_seen": first, "last_seen": last,
 			"moved_from": moved,
 			"blocked":    blocked == 1, "blocked_at": blockedAt, "blocked_by": blockedBy,
-			"protected":  infra[ip],
+			"protected": infra[ip],
 		})
 	}
 
@@ -665,7 +665,7 @@ func handleShifts(w http.ResponseWriter, r *http.Request, u *User) {
 				"phone": phone, "role": role, "days_mask": mask,
 				"starts_at": starts, "ends_at": ends, "sort_order": order,
 				"active": active == 1, "telegram": telegram,
-				"days":   maskToDays(mask)})
+				"days": maskToDays(mask)})
 		}
 	}
 
@@ -908,11 +908,11 @@ func handleDeleteShift(w http.ResponseWriter, r *http.Request, u *User) {
 // `reassign_now` set makes the incoming person the recipient immediately.
 func handleHandover(w http.ResponseWriter, r *http.Request, u *User) {
 	var b struct {
-		ToAdmin   int64  `json:"to_admin"`
-		Reason    string `json:"reason"`
-		Note      string `json:"note"`
-		DueAt     string `json:"due_at"`
-		Redispatch bool  `json:"redispatch"`
+		ToAdmin    int64  `json:"to_admin"`
+		Reason     string `json:"reason"`
+		Note       string `json:"note"`
+		DueAt      string `json:"due_at"`
+		Redispatch bool   `json:"redispatch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
 		fail(w, http.StatusBadRequest, "invalid json")
@@ -1174,12 +1174,12 @@ func handleAckEvent(w http.ResponseWriter, r *http.Request, u *User) {
 // ---------------------------------------------------------------- discovery
 
 type discoveredLink struct {
-	AName string `json:"a"`
-	BName string `json:"b"`
-	IfA   string `json:"if_a"`
-	IfB   string `json:"if_b"`
-	Proto string `json:"proto"`
-	Note  string `json:"evidence"`
+	AName string  `json:"a"`
+	BName string  `json:"b"`
+	IfA   string  `json:"if_a"`
+	IfB   string  `json:"if_b"`
+	Proto string  `json:"proto"`
+	Note  string  `json:"evidence"`
 	Conf  float64 `json:"confidence"`
 }
 
@@ -1333,13 +1333,13 @@ func handleDiscover(w http.ResponseWriter, r *http.Request, u *User) {
 	// Pass 1: learn each device's own OSPF router-id. The adjacency table only
 	// names peers by router-id, so without this map there is nothing to resolve
 	// the neighbour list against.
-	self := map[string]string{}   // hostname -> router-id
+	self := map[string]string{} // hostname -> router-id
 	var found []discoveredLink
 	var notes []string
 
 	type observed struct {
-		host   string
-		peers  []ospfPeer
+		host  string
+		peers []ospfPeer
 	}
 	var seenPeers []observed
 
@@ -1446,10 +1446,10 @@ func handleDiscover(w http.ResponseWriter, r *http.Request, u *User) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"routers":   len(devs),
-		"links":     found,
-		"new":       pending,
-		"notes":     notes,
+		"routers":    len(devs),
+		"links":      found,
+		"new":        pending,
+		"notes":      notes,
 		"scanned_at": time.Now().Format("2006-01-02 15:04:05"),
 	})
 }
@@ -1601,7 +1601,7 @@ func handlePollInfo(w http.ResponseWriter, r *http.Request, u *User) {
 		ageS = int(time.Since(t).Seconds())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"interval_s": interval,
+		"interval_s":  interval,
 		"last_sample": last,
 		"age_s":       ageS,
 		"healthy":     ageS <= interval*3,
@@ -1829,6 +1829,28 @@ func redispatchMail(adminID int64) (int, []string) {
 	_, _ = db.Exec(`INSERT INTO alert_deliveries(rule_id,event_id,admin_id,to_addr,
 	                subject,status,error,tries,kind) VALUES (NULL,NULL,?,?,?,?,?,1,'redispatch')`,
 		adminID, email, subject, status, errText)
+
+	// The "Re-send open alerts" button also posts to the internal Telegram
+	// group. One delivery row per channel, so the NOTE column proves which
+	// transport carried it. Telegram is attempted even when mail failed.
+	tgStatus, tgNote := "sent", "telegram"
+	chat := tgChatID()
+	if chat == "" {
+		tgStatus, tgNote = "failed", "Not configured"
+	} else {
+		short := lines
+		if len(short) > 8 {
+			short = short[:8]
+		}
+		text := fmt.Sprintf("[%s] %d open alert(s)\n%s",
+			strings.ToUpper(worst), len(lines), strings.Join(short, "\n"))
+		if e := sendMessage(chat, text, ""); e != nil {
+			tgStatus, tgNote = "failed", e.Error()
+		}
+	}
+	_, _ = db.Exec(`INSERT INTO alert_deliveries(rule_id,event_id,admin_id,to_addr,
+	                subject,status,error,tries,kind) VALUES (NULL,NULL,?,?,?,?,?,1,'redispatch')`,
+		adminID, chat, subject, tgStatus, tgNote)
 	if !ok {
 		return 0, []string{email}
 	}

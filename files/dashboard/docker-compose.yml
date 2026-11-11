@@ -88,6 +88,10 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
       MAIL_FROM: ${MAIL_FROM:-lab@lab.local}
+      # Internal incident alerts. Values come from the untracked /root/lab/.env
+      # at deploy time; the bot token is a credential and never lives in git.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     volumes:
       - ./db:/data
     mem_limit: 48m

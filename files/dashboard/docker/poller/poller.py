@@ -12,6 +12,7 @@ write lock across a dozen SNMP walks blocks the API for longer than its
 busy_timeout, and logins then fail with "database is locked".
 """
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -22,6 +23,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 
@@ -39,6 +42,12 @@ MAIL_FROM = os.environ.get("MAIL_FROM", "lab-dashboard@localhost").strip()
 # When no SMTP relay is configured we still want a visible trace, so mail is
 # written to /data/outbox as .eml instead of being silently dropped.
 MAIL_DIR = os.environ.get("MAIL_DIR", "/data/outbox")
+
+# Internal Telegram alerts. Both values come from the environment. The token is
+# the bot's password: it must never reach the database, a log line or an error
+# string, and it is never committed to git.
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 O_UPTIME = "1.3.6.1.2.1.1.3.0"
 O_SYSNAME = "1.3.6.1.2.1.1.5.0"
@@ -811,6 +820,34 @@ def send_mail(to_addr, subject, body):
         return False, str(e)[:300], "file"
 
 
+def send_telegram(text):
+    """Post one incident alert to the team group. Return (ok, error, channel).
+
+    stdlib urllib only: the poller has a 48 MB memory cap, so adding a
+    Telegram client library is not an option. The Bot API URL contains the
+    token, so errors are deliberately reported without it.
+    """
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
+        return False, "Not configured", "telegram"
+    url = "https://api.telegram.org/bot%s/sendMessage" % TELEGRAM_TOKEN
+    data = urllib.parse.urlencode({"chat_id": TELEGRAM_CHAT, "text": text}).encode("utf-8")
+    try:
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=8) as response:
+            body = json.loads(response.read().decode("utf-8", "replace") or "{}")
+            if not body.get("ok"):
+                return False, str(body.get("description", "ok=false"))[:300], "telegram"
+            result = body.get("result")
+            mid = result.get("message_id") if isinstance(result, dict) else None
+            # Evidence for the post-mortem: the group accepted the post and
+            # returned an id. Never log the URL (it contains the token).
+            print("telegram: delivered message_id=%s" % mid, flush=True)
+        return True, "", "telegram"
+    except Exception as e:
+        msg = "%s: %s" % (type(e).__name__, str(e)[:200])
+        return False, msg.replace(TELEGRAM_TOKEN, "<redacted>"), "telegram"
+
+
 def consider_alerts(c, new_event_ids):
     """Match the events just written against the rules, mail the on-call admin."""
     if not new_event_ids:
@@ -885,6 +922,17 @@ def consider_alerts(c, new_event_ids):
                           (r["id"], ev["id"], admin["id"] if admin else None, to, subject,
                            "sent" if ok else "failed", err if err else transport, 1))
 
+            # The same incident also goes to the internal Telegram group. One
+            # delivery row per channel, so the NOTE column proves which
+            # transport actually carried it (the literal word "telegram").
+            tg_text = "[%s] %s\n%s" % (ev["severity"].upper(), where, ev["message"])
+            tg_ok, tg_err, tg_channel = send_telegram(tg_text)
+            c.execute("""INSERT INTO alert_deliveries(rule_id, event_id, admin_id, to_addr,
+                         subject, status, error, tries, kind) VALUES (?,?,?,?,?,?,?,?,?)""",
+                      (r["id"], ev["id"], admin["id"] if admin else None, TELEGRAM_CHAT,
+                       subject, "sent" if tg_ok else "failed",
+                       tg_err if tg_err else tg_channel, 1, "rule"))
+
 
 # ---------------------------------------------------------------- cycle
 
@@ -934,7 +982,15 @@ def redispatch(c, hours=8):
                  VALUES (?,?,?,?,?,?,?,?,?)""",
               (None, events[0]["id"], admin["id"], admin["email"], subject,
                "sent" if ok else "failed", err if err else transport, 1, "redispatch"))
-    return (1 if ok else 0), [admin["email"]]
+    # The handover dump also reaches the internal group.
+    tg_text = "[%s] %d open alert(s)\n%s" % (worst.upper(), len(events), "\n".join(lines[:8]))
+    tg_ok, tg_err, tg_channel = send_telegram(tg_text)
+    c.execute("""INSERT INTO alert_deliveries(rule_id, event_id, admin_id, to_addr,
+                 subject, status, error, tries, kind)
+                 VALUES (?,?,?,?,?,?,?,?,?)""",
+              (None, events[0]["id"], admin["id"], TELEGRAM_CHAT, subject,
+               "sent" if tg_ok else "failed", tg_err if tg_err else tg_channel, 1, "redispatch"))
+    return (1 if ok else 0) + (1 if tg_ok else 0), [admin["email"], TELEGRAM_CHAT]
 
 
 def cycle(c):

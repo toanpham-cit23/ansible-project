@@ -62,6 +62,9 @@ files/lab/*.db
 
 # --- runtime noise ---
 .commit-msg
+# go build ./... writes the binary into the source directory; never commit it.
+files/dashboard/docker/api-go/labapi
+*.exe
 __pycache__/
 *.pyc
 dashboard.tar.gz
@@ -81,6 +84,11 @@ files/dashboard/db/*.json
 # AES-GCM ciphertext inside net.db. Neither form belongs in git.
 telegram.env
 files/dashboard/db/telegram.env
+# NEVER create files/dashboard/.env: the dashboard playbook copies this tree
+# over /root/lab/, which would overwrite the live .env holding JWT_SECRET,
+# NETDB_KEY and ADMIN_PASSWORD. Telegram values are appended to /root/lab/.env
+# on the controller instead.
+files/dashboard/.env
 .env.*
 !.env.example
 *.secret

@@ -2,32 +2,32 @@
 //
 // HONEST STATEMENT OF CURRENT STATE (do not delete; the report relies on it):
 //
-//   Already present before this change:
-//     * docker/poller/poller.py::arp_entries() walks ipNetToMediaTable on each
-//       router and collect_leases() writes ip_leases + lease_events(kind='new').
-//       So first_seen / last_seen / seen_on / MAC / OUI vendor ARE collected.
-//     * files/ops/network-sync.sh re-syncs DuckDNS A records and the local DNS
-//       override after an addressing change. It does NOT scan for devices.
-//     * app.html had a "Discovery" menu entry, but it pointed at the Setup
-//       view (#/setup) whose content is devices + OSPF link proposals + DNS.
-//       There was no view dedicated to newly seen hosts.
+//	Already present before this change:
+//	  * docker/poller/poller.py::arp_entries() walks ipNetToMediaTable on each
+//	    router and collect_leases() writes ip_leases + lease_events(kind='new').
+//	    So first_seen / last_seen / seen_on / MAC / OUI vendor ARE collected.
+//	  * files/ops/network-sync.sh re-syncs DuckDNS A records and the local DNS
+//	    override after an addressing change. It does NOT scan for devices.
+//	  * app.html had a "Discovery" menu entry, but it pointed at the Setup
+//	    view (#/setup) whose content is devices + OSPF link proposals + DNS.
+//	    There was no view dedicated to newly seen hosts.
 //
-//   What this file adds:
-//     * A real ledger table (discovered_devices) that is fed, idempotently,
-//       from ip_leases. "Unknown" = a binding whose IP is not in `devices`
-//       and whose MAC is not in host_design (when that table exists).
-//     * GET /api/discovery exposes that ledger, the "new" lease events and an
-//       explicit list of what is still NOT implemented.
-//     * Admin-only acknowledge / ignore / note actions.
+//	What this file adds:
+//	  * A real ledger table (discovered_devices) that is fed, idempotently,
+//	    from ip_leases. "Unknown" = a binding whose IP is not in `devices`
+//	    and whose MAC is not in host_design (when that table exists).
+//	  * GET /api/discovery exposes that ledger, the "new" lease events and an
+//	    explicit list of what is still NOT implemented.
+//	  * Admin-only acknowledge / ignore / note actions.
 //
-//   Still NOT implemented (partial, on purpose):
-//     * No LLDP/CDP neighbour walk, no mDNS/SSDP, no active port scanning and
-//       no DHCP-snooping feed. Detection is passive, from ARP only.
-//     * No automatic promotion into `devices`; a human still adds a box in
-//       Setup. The Bot API likewise cannot enumerate group members, which is
-//       why the roster stays the source of truth for mentions.
-//     * network-sync.sh is a controller script outside the dashboard; it was
-//       deliberately NOT modified here (dashboard-only change).
+//	Still NOT implemented (partial, on purpose):
+//	  * No LLDP/CDP neighbour walk, no mDNS/SSDP, no active port scanning and
+//	    no DHCP-snooping feed. Detection is passive, from ARP only.
+//	  * No automatic promotion into `devices`; a human still adds a box in
+//	    Setup. The Bot API likewise cannot enumerate group members, which is
+//	    why the roster stays the source of truth for mentions.
+//	  * network-sync.sh is a controller script outside the dashboard; it was
+//	    deliberately NOT modified here (dashboard-only change).
 package main
 
 import (
@@ -180,11 +180,11 @@ func handleDiscovery(w http.ResponseWriter, r *http.Request, u *User) {
 		"ledger":     all,
 		"events":     events,
 		"counts": map[string]any{
-			"unknown":       len(candidates),
-			"ledger":        len(all),
-			"new":           countDiscoveryState("new", false),
-			"acknowledged":  countDiscoveryState("acknowledged", false),
-			"ignored":       countDiscoveryState("ignored", false),
+			"unknown":         len(candidates),
+			"ledger":          len(all),
+			"new":             countDiscoveryState("new", false),
+			"acknowledged":    countDiscoveryState("acknowledged", false),
+			"ignored":         countDiscoveryState("ignored", false),
 			"known_inventory": countDiscoveryState("", true),
 		},
 		"sync": syncNote,

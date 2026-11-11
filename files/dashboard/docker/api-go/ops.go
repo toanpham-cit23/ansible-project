@@ -87,19 +87,19 @@ func handleOps(w http.ResponseWriter, r *http.Request, u *User) {
 		_ = rs.Close()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"duckdns":         readOps("duckdns"),
-		"tls":             readOps("tls"),
-		"network":         readOps("network"),
-		"cloudflared":     readOps("cloudflared"),
-		"firewall":        readOps("firewall"),
-		"retention":       readOps("retention"),
-		"backup":          readOps("backup"),
-		"db_bytes":        dbSize,
-		"db_size":         humanBytes(dbSize),
-		"inventory":       inventory,
-		"next_clearance":  nextClearance(),
-		"retention_days":  180,
-		"trusted_https":   certPresent(),
+		"duckdns":        readOps("duckdns"),
+		"tls":            readOps("tls"),
+		"network":        readOps("network"),
+		"cloudflared":    readOps("cloudflared"),
+		"firewall":       readOps("firewall"),
+		"retention":      readOps("retention"),
+		"backup":         readOps("backup"),
+		"db_bytes":       dbSize,
+		"db_size":        humanBytes(dbSize),
+		"inventory":      inventory,
+		"next_clearance": nextClearance(),
+		"retention_days": 180,
+		"trusted_https":  certPresent(),
 	})
 }
 
@@ -144,7 +144,9 @@ func handleOpsRetention(w http.ResponseWriter, r *http.Request, u *User) {
 	}
 	// An actual clearance is destructive: it needs the word APPLY in the body.
 	if mode == "apply" {
-		var b struct{ Confirm string `json:"confirm"` }
+		var b struct {
+			Confirm string `json:"confirm"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		if b.Confirm != "APPLY" {
 			fail(w, http.StatusBadRequest, "send {\"confirm\":\"APPLY\"} to run a real clearance")
@@ -165,19 +167,19 @@ func handleOpsRetention(w http.ResponseWriter, r *http.Request, u *User) {
 }
 
 type nodeRow struct {
-	ID       int64   `json:"id"`
-	Hostname string  `json:"hostname"`
-	IP       string  `json:"ip"`
-	Kind     string  `json:"kind"`
-	State    string  `json:"state"`
+	ID       int64    `json:"id"`
+	Hostname string   `json:"hostname"`
+	IP       string   `json:"ip"`
+	Kind     string   `json:"kind"`
+	State    string   `json:"state"`
 	CPU      *float64 `json:"cpu_pct"`
 	Mem      *float64 `json:"mem_pct"`
-	UptimeS  *int64  `json:"uptime_s"`
-	IfUp     *int64  `json:"if_up"`
-	IfTotal  *int64  `json:"if_total"`
-	RTT      *int64  `json:"rtt_ms"`
-	SSH      bool    `json:"ssh_reachable"`
-	SSHMs    int64   `json:"ssh_probe_ms"`
+	UptimeS  *int64   `json:"uptime_s"`
+	IfUp     *int64   `json:"if_up"`
+	IfTotal  *int64   `json:"if_total"`
+	RTT      *int64   `json:"rtt_ms"`
+	SSH      bool     `json:"ssh_reachable"`
+	SSHMs    int64    `json:"ssh_probe_ms"`
 }
 
 // handleOpsTelemetry answers the gap-analysis finding that CPU/RAM/uptime were
@@ -319,7 +321,7 @@ func handleOpsGaps(w http.ResponseWriter, r *http.Request, u *User) {
 		{"area": "Database size", "before": "Not visible anywhere", "after": "Shown in the top status bar",
 			"status": "closed", "evidence": "read directly from the SQLite file"},
 		{"area": "Backup / restore status", "before": "Backups existed on disk, nothing in the UI",
-			"after": "Backup widget with last snapshot, size, count, last restore and a queued snapshot trigger",
+			"after":  "Backup widget with last snapshot, size, count, last restore and a queued snapshot trigger",
 			"status": "closed", "evidence": "host-side snapshot worker"},
 		{"area": "DNS / TLS / firewall / retention", "before": "No operational state exposed",
 			"after": "Top status bar and maintenance widget read controller status files", "status": "closed",
@@ -334,7 +336,7 @@ func handleOpsGaps(w http.ResponseWriter, r *http.Request, u *User) {
 			"after": "Shown where available; a dedicated per-node disk sample is still pending", "status": "partial",
 			"evidence": "health endpoint supplies disk_pct"},
 		{"area": "Public HTTPS", "before": "HTTP on :8080 only",
-			"after": "TLS listener on :8443 is ready; a trusted certificate needs a DuckDNS token and subdomain",
+			"after":  "TLS listener on :8443 is ready; a trusted certificate needs a DuckDNS token and subdomain",
 			"status": "blocked", "evidence": "certPresent() == " + fmt.Sprint(certPresent())},
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"gaps": gaps})
