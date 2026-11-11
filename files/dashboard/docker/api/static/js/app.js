@@ -865,7 +865,18 @@ function labTopology(t, leases) {
   const RW = 150, RH = 52;          // router
   const SW = 150, SH = 48;          // switch
   const HW = 150, HH = 46;          // host
-  const CY = 52, RY = 176, SY = 306, H0 = 392, HGAP = 58;
+  const CY = 52, RY = 176, SY0 = 306, H00 = 392, HGAP = 58;
+
+  // The middle row used to be one line with spacing W/(n+1). At 150 px per card
+  // that fits four; a fifth and sixth card simply overlapped the neighbours,
+  // which is what made an added set of test nodes unreadable. Wrap instead of
+  // shrinking: text stays legible and the picture grows downwards.
+  const PER_ROW = 4;
+  const ROWGAP = 78;
+  const nR = Math.max(routers.length, 1);
+  const nodeRows = Math.ceil(nR / PER_ROW);
+  const SY = SY0 + (nodeRows - 1) * ROWGAP;
+  const H0 = H00 + (nodeRows - 1) * ROWGAP;
 
   const cols = LAB.switches.map((_, i) => LAB.hosts.filter((h) => h.sw === i));
   const rows = Math.max(1, ...cols.map((c) => c.length));
@@ -918,9 +929,16 @@ function labTopology(t, leases) {
     `<path d="M${ax.toFixed(1)} ${ay.toFixed(1)} Q${((ax + bx) / 2).toFixed(1)} ${(RY - 64).toFixed(1)} ${bx.toFixed(1)} ${by.toFixed(1)}" class="${cls}" fill="none"/>`);
 
   const ctrlPt = [W / 2, CY];
-  const nR = Math.max(routers.length, 1);
-  const rPt = routers.map((_, i) => [W * (i + 1) / (nR + 1), RY]);
-  const sPt = LAB.switches.map((_, i) => [200 + i * 290, SY]);
+  // Each row is centred on its own count, so a short last row does not leave a
+  // gap on one side.
+  const rPt = routers.map((_, i) => {
+    const row = Math.floor(i / PER_ROW);
+    const first = row * PER_ROW;
+    const inRow = Math.min(PER_ROW, nR - first);
+    const col = i - first;
+    return [W * (col + 1) / (inRow + 1), RY + row * ROWGAP];
+  });
+  const sPt = LAB.switches.map((_, i) => [W * (i + 1) / 4, SY]);
 
   // Packets, drawn between the links and the cards so they disappear into a
   // switch and come out the other side instead of sliding over its label.
