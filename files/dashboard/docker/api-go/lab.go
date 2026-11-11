@@ -5,6 +5,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -1570,6 +1571,66 @@ func handleAddDevice(w http.ResponseWriter, r *http.Request, u *User) {
 	}
 	id, _ := res.LastInsertId()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+// handleDevicePool lists addresses that are free right now, so "add a node"
+// offers a real choice instead of asking the operator to guess. It is derived
+// from what the database already knows: every subnet, minus every address held
+// by a device or a lease. Nothing is reserved - two admins adding at the same
+// moment can still collide, and the UNIQUE constraint is what stops it.
+func handleDevicePool(w http.ResponseWriter, r *http.Request, u *User) {
+	used := map[string]bool{}
+	if rs, err := db.Query(`SELECT mgmt_ip FROM devices UNION SELECT ip FROM ip_leases`); err == nil {
+		for rs.Next() {
+			var ip string
+			if rs.Scan(&ip) == nil {
+				used[strings.TrimSpace(ip)] = true
+			}
+		}
+		_ = rs.Close()
+	}
+
+	out := []string{}
+	rs, err := db.Query(`SELECT cidr FROM subnets ORDER BY id`)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ips": out, "note": "No subnet defined yet."})
+		return
+	}
+	defer rs.Close()
+	for rs.Next() {
+		var cidr string
+		if rs.Scan(&cidr) != nil {
+			continue
+		}
+		_, block, err := net.ParseCIDR(cidr)
+		if err != nil || len(block.IP) != 4 {
+			continue
+		}
+		// /24 or smaller: walk the hosts, skipping the network and broadcast
+		// addresses. Anything larger than /22 is skipped rather than walked.
+		ones, bits := block.Mask.Size()
+		if bits-ones > 10 {
+			continue
+		}
+		base := binary.BigEndian.Uint32(block.IP.To4())
+		count := uint32(1) << uint(bits-ones)
+		for off := uint32(1); off < count-1 && len(out) < 40; off++ {
+			var b [4]byte
+			binary.BigEndian.PutUint32(b[:], base+off)
+			ip := net.IP(b[:]).String()
+			if !used[ip] {
+				out = append(out, ip)
+			}
+		}
+		if len(out) >= 40 {
+			break
+		}
+	}
+	note := "Địa chỉ lấy từ dải mạng đã khai báo, trừ những địa chỉ đang được thiết bị hoặc lease giữ."
+	if len(out) == 0 {
+		note = "Dải mạng đã hết địa chỉ trống."
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ips": out, "note": note})
 }
 
 // handleDeleteDevice removes a box from the inventory. Discovered links and

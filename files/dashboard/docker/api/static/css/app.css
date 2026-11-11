@@ -129,8 +129,14 @@ button.act.primary { background: var(--accent); border-color: var(--accent); col
 button.act.primary:hover { opacity: .9; color: #fff; }
 /* cutting a connection off is destructive, so it does not look like every
    other button on the row */
-button.act.danger { color: var(--err); border-color: rgba(242, 73, 92, .45); }
-button.act.danger:hover { border-color: var(--err); color: var(--err); background: rgba(242, 73, 92, .10); }
+/* A destructive action is filled, not outlined: "terminate" and "Delete this
+   bot" must look different from every ordinary button next to them. The
+   element-qualified selector is deliberate - it has to outrank .act's own
+   background, which is why the earlier outline-only rule produced red text on
+   a red fill and an apparently empty button. */
+button.act.danger { color: #fff; background: var(--err); border-color: var(--err); font-weight: 600; }
+button.act.danger:hover { background: var(--err); filter: brightness(1.1); }
+button.act.danger:disabled { opacity: .45; filter: none; cursor: not-allowed; }
 button.act:disabled { opacity: .45; cursor: default; }
 tr.cut td { background: rgba(242, 73, 92, .05); }
 tr.cut td:first-child { box-shadow: inset 3px 0 0 var(--err); }
@@ -590,9 +596,6 @@ input.lease-name:focus { border-style: solid; border-color: var(--accent); outli
 .dev-card.unknown { border-style: dashed; }
 .dev-card.unknown .mini { opacity: .25; }
 
-/* destructive action in Settings */
-.act.danger { color: #fff; background: var(--err); border-color: var(--err); }
-.act.danger:hover { filter: brightness(1.08); }
 
 /* ---- Logs pagination ---- */
 .pager { display: flex; gap: 5px; align-items: center; flex-wrap: wrap;

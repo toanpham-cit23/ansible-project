@@ -1263,6 +1263,7 @@ func main() {
 	mux.HandleFunc("POST /api/logs/analysis/{id}/ack", withAdmin(handleAckFinding))
 	mux.HandleFunc("POST /api/events/{id}/ack", withAdmin(handleAckEvent))
 
+	mux.HandleFunc("GET /api/devices/pool", withUser(handleDevicePool))
 	mux.HandleFunc("POST /api/devices", withAdmin(handleAddDevice))
 	mux.HandleFunc("DELETE /api/devices/{id}", withAdmin(handleDeleteDevice))
 	mux.HandleFunc("POST /api/topology/discover", withAdmin(handleDiscover))

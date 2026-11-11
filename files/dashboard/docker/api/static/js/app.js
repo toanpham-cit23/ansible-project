@@ -386,6 +386,32 @@ async function onClick(e) {
     return;
   }
 
+  if (b.dataset.act === 'device-add') {
+    const name = (($('#nd-name') || {}).value || '').trim();
+    const ip = (($('#nd-ip') || {}).value || '').trim();
+    const kind = (($('#nd-kind') || {}).value || 'router');
+    if (!name) { toast('A name is required', true); return; }
+    if (!ip) { toast('No free address left in the pool', true); return; }
+    try {
+      await api.post('/api/devices', { hostname: name, mgmt_ip: ip, kind });
+      toast('Node ' + name + ' added at ' + ip);
+      route();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  if (b.dataset.act === 'device-delete') {
+    const ok = await confirmDialog('Delete ' + (b.dataset.who || 'this device') + '?',
+      'Xoá thiết bị khỏi danh mục. Đây là thiết bị chưa nhận diện được nên không có dữ liệu '
+      + 'lịch sử đáng giữ. Thao tác không hoàn tác được.', 'Delete');
+    if (!ok) return;
+    try {
+      await api.del('/api/devices/' + b.dataset.id);
+      toast('Device deleted');
+      route();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+
   if (b.dataset.act === 'staff-approve' || b.dataset.act === 'staff-decline') {
     const approve = b.dataset.act === 'staff-approve';
     const ok = await confirmDialog(approve ? 'Approve this person?' : 'Decline this request?',
@@ -896,7 +922,12 @@ function labTopology(t, leases) {
       + `<animateMotion dur="3.6s" begin="${delay.toFixed(2)}s" repeatCount="indefinite"`
       + ` path="${path}"/></circle>`);
   };
-  const upOf = (i) => LAB.uplinks[i % LAB.uplinks.length];
+  // No modulo here. A router that is not part of the designed fabric (r4 is
+  // added by hand) used to inherit uplinks[0] by wrapping around, which made
+  // the diagram claim "Switch 1 loses its primary uplink" for a box that was
+  // never cabled to it. An undesigned router now has no uplinks, so it draws
+  // no switch links and reports no uplink fallout.
+  const upOf = (i) => LAB.uplinks[i] || { primary: [], backup: [] };
   const macsOn = (si) => cols[si].map((h) => h.mac.toUpperCase());
   // Which router actually carries each switch right now: its live primary, or
   // - when that primary is down - the live spare. Tracing has to follow the
@@ -1462,12 +1493,16 @@ const views = {
   },
 
   async monitoring() {
-    const [t, ld] = await Promise.all([
+    const admin = state.me.role === 'admin';
+    const [t, ld, pool] = await Promise.all([
       api.get('/api/topology'),
       // every lease, not only the online ones: a terminated host is offline by
       // definition, and filtering here would erase the very state the diagram
       // is supposed to show
       api.get('/api/leases?limit=300').catch(() => ({ leases: [] })),
+      // Free addresses for the "add a node" form. Read-only and cheap; only an
+      // admin sees the form, but a viewer's page should not 403 in the console.
+      api.get('/api/devices/pool').catch(() => ({ ips: [] })),
     ]);
     const built = labTopology(t, (ld && ld.leases) || []);
     state.topoIssues = built.issues;
@@ -1522,8 +1557,30 @@ const views = {
           : '<path d="M8 4.1v4.5" class="ix-mark"/><circle cx="8" cy="11.3" r=".95" class="ix-mark-f"/>'}
         </svg></button>`;
 
-    const nodes = `<div class="panel"><table>
-      <thead><tr><th>Host</th><th>Address</th><th>Class</th><th>State</th><th></th><th></th></tr></thead>
+    const nodes = `${admin ? `<div class="panel" style="margin-bottom:9px;padding:11px 13px">
+      <div class="p-title" style="text-align:left;margin-bottom:8px">Add a node</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:9px">
+        <label class="muted" style="font-size:12px">Name<br>
+          <input id="nd-name" placeholder="lab-pc-01" style="width:100%;margin-top:4px"></label>
+        <label class="muted" style="font-size:12px">Address<br>
+          <select id="nd-ip" style="width:100%;margin-top:4px">
+            ${(pool.ips || []).map((ip) => `<option value="${ip}">${ip}</option>`).join('') || '<option value="">no free address</option>'}
+          </select></label>
+        <label class="muted" style="font-size:12px">Class<br>
+          <select id="nd-kind" style="width:100%;margin-top:4px">
+            <option value="router">router</option><option value="switch">switch</option>
+            <option value="l3switch">l3switch</option><option value="server">server</option>
+          </select></label>
+      </div>
+      <div class="row" style="margin-top:10px;justify-content:flex-end">
+        <button class="act primary" data-act="device-add">Add node</button>
+      </div>
+      <p class="muted" style="font-size:11.5px;margin-top:7px">
+        ${esc(pool.note || '')} Thêm node mô phỏng thiết bị ngoài; node chưa từng trả lời sẽ
+        hiện dấu hỏi vàng và bị xoá sau 180 giây nếu không phản hồi.
+      </p>
+    </div>` : ''}<div class="panel"><table>
+      <thead><tr><th>Host</th><th>Address</th><th>Class</th><th>State</th><th></th><th></th><th></th></tr></thead>
       <tbody>${t.nodes.map((n) => {
         const issue = built.issues['dev:' + n.id];
         return `<tr${issue ? ' class="cut"' : ''}>
@@ -1531,6 +1588,10 @@ const views = {
         <td><span class="pill ${n.last_state === 'up' ? 'up' : 'down'}">${esc(n.last_state || 'unknown')}</span></td>
         <td>${issue ? xIcon(issue.sev, 'dev:' + n.id) : ''}</td>
         <td>${n.effective_kind === 'server' ? '' : `<button class="act" data-act="term" data-id="${n.id}">terminal</button>`}</td>
+        <td>${(n.effective_kind !== 'server' && n.last_state !== 'up')
+          ? `<button class="act danger" data-act="device-delete" data-id="${n.id}"
+                     data-who="${esc(n.hostname)}">Delete</button>`
+          : '<span class="muted" style="font-size:11.5px">protected</span>'}</td>
       </tr>`;
       }).join('')}</tbody></table></div>`;
 
