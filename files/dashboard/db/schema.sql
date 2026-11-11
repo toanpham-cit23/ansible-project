@@ -242,6 +242,25 @@ CREATE INDEX IF NOT EXISTS ix_reach ON reach_samples(device_id, ts DESC);
 -- ---------------------------------------------------------------- shifts
 -- Who receives alert mail right now. `starts_at`/`ends_at` are local wall
 -- clock (HH:MM) so a roster survives daylight-saving changes.
+-- Self-service roster requests. A person in the Telegram group sends
+-- /addstaff <dashboard-id>; the bot already knows their @username from the
+-- update, so nothing here is typed by hand and nothing can be spoofed by
+-- someone outside the group. An admin still approves before it becomes a shift.
+CREATE TABLE IF NOT EXISTS staff_requests (
+  id           INTEGER PRIMARY KEY,
+  telegram_id  INTEGER NOT NULL,
+  username     TEXT NOT NULL DEFAULT '',
+  display_name TEXT NOT NULL DEFAULT '',
+  note         TEXT NOT NULL DEFAULT '',
+  status       TEXT NOT NULL DEFAULT 'pending'
+               CHECK (status IN ('pending','approved','declined')),
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  decided_at   TEXT,
+  decided_by   TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_staff_req_tg
+  ON staff_requests(telegram_id) WHERE status = 'pending';
+
 CREATE TABLE IF NOT EXISTS shift_admins (
   id         INTEGER PRIMARY KEY,
   name       TEXT NOT NULL,

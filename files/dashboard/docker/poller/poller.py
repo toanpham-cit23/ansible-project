@@ -95,6 +95,14 @@ REBOOT_DROP_S = 60
 # If a device was unreachable for at least this long before it came back, call
 # it a power loss rather than a quick restart.
 POWER_GAP_S = 20
+# An unrecognised box that has not answered for this long is removed from the
+# inventory and the team is told. Only kind='unknown' rows are eligible: the
+# controller and the routers are infrastructure, and deleting one because it
+# rebooted would be a self-inflicted outage. 180 s = the operator's rule.
+UNKNOWN_TTL_S = int(os.environ.get("UNKNOWN_TTL_S", "180"))
+# device_id -> first time we saw it not answering. Memory only: a poller
+# restart resets the clock, which is the safe direction (it deletes later).
+DOWN_SINCE = {}
 # Identical events inside this window are folded into one row instead of being
 # re-filed every poll: a flapping link would otherwise add 12 rows a minute and
 # mail on the same subject over and over once the rule cooldown expired.
@@ -1096,6 +1104,30 @@ def cycle(c):
 
         if state == "up":
             LAST_OK[d["id"]] = time.time()
+
+        # 180 s rule. A device we could never identify is not inventory; keeping
+        # it forever just fills the page with question marks. It is removed and
+        # announced, so nobody has to wonder where a box went.
+        if d["kind"] == "unknown":
+            if state == "up":
+                DOWN_SINCE.pop(d["id"], None)
+            else:
+                first = DOWN_SINCE.setdefault(d["id"], time.time())
+                if time.time() - first >= UNKNOWN_TTL_S:
+                    gone = d["hostname"] or d["mgmt_ip"]
+                    c.execute("DELETE FROM devices WHERE id = ?", (d["id"],))
+                    DOWN_SINCE.pop(d["id"], None)
+                    UPTIME.pop(d["id"], None)
+                    LAST_OK.pop(d["id"], None)
+                    msg = ("[HIGH] %s\nThiết bị không nhận diện được đã không phản hồi "
+                           "%d giây, đã xoá khỏi hệ thống (%s)." % (gone, UNKNOWN_TTL_S, d["mgmt_ip"]))
+                    tg_ok, tg_err, tg_ch = send_telegram(msg)
+                    c.execute("""INSERT INTO alert_deliveries(rule_id,event_id,admin_id,to_addr,
+                                 subject,status,error,tries,kind) VALUES (NULL,NULL,NULL,?,?,?,?,1,'rule')""",
+                              (TELEGRAM_CHAT, "unidentified device removed: " + gone,
+                               "sent" if tg_ok else "failed", tg_err if tg_err else tg_ch))
+                    print("removed unidentified device %s after %ds" % (gone, UNKNOWN_TTL_S), flush=True)
+                    continue
 
         c.execute("UPDATE devices SET last_state=?, last_seen=datetime('now') WHERE id=?",
                   (state, d["id"]))

@@ -518,6 +518,26 @@ func handleTelegramConfig(w http.ResponseWriter, r *http.Request, u *User) {
 		"env_override": tgEnvOverride()})
 }
 
+// handleTelegramDelete wipes the stored bot configuration. The Telegram-side
+// bot is untouched - this only removes the dashboard's ability to use it, so
+// the token stops existing anywhere on this host. Refused when the token comes
+// from the environment, because deleting it here would silently reappear on
+// the next restart and the UI must not lie about what it did.
+func handleTelegramDelete(w http.ResponseWriter, r *http.Request, u *User) {
+	if tgEnvOverride() {
+		fail(w, http.StatusConflict, "token đang lấy từ TELEGRAM_BOT_TOKEN trong env; xoá trong env trước")
+		return
+	}
+	if _, err := db.Exec(`UPDATE telegram_config SET token_enc = NULL, chat_id = '',
+	                      bot_username = '', updated_at = datetime('now'),
+	                      updated_by = ? WHERE id = 1`, u.Username); err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = db.Exec(`DELETE FROM telegram_link_tokens WHERE used = 0`)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": true})
+}
+
 // POST /api/telegram/auth - Login Widget callback. The hash is verified with
 // the bot token on the server; the client is never trusted (runbook 4.1e).
 func handleTelegramAuth(w http.ResponseWriter, r *http.Request, u *User) {
@@ -811,6 +831,36 @@ func tgHandleCommand(text string, telegramID int64, username string, chatID int6
 				}
 			}
 		}
+		return
+	}
+
+	// /addstaff <dashboard-id> - self-service roster request. The sender is
+	// proven by the update itself: we take their id and @username from
+	// Telegram, never from the message text, so a stranger cannot request a
+	// shift on someone else's behalf.
+	if cmd == "/addstaff" {
+		if username == "" {
+			_ = sendMessage(strconv.FormatInt(chatID, 10),
+				"Tài khoản Telegram của bạn chưa có @username. Đặt username trong Telegram rồi thử lại.", "")
+			return
+		}
+		note := ""
+		if len(parts) > 1 {
+			note = strings.Join(parts[1:], " ")[:min(120, len(strings.Join(parts[1:], " ")))]
+		}
+		if _, err := db.Exec(`INSERT INTO staff_requests(telegram_id, username, display_name, note)
+		                      VALUES (?,?,?,?)
+		                      ON CONFLICT(telegram_id) WHERE status = 'pending'
+		                      DO UPDATE SET username = excluded.username,
+		                                    note = excluded.note,
+		                                    created_at = datetime('now')`,
+			telegramID, username, username, note); err != nil {
+			_ = sendMessage(strconv.FormatInt(chatID, 10), "Không ghi được yêu cầu: "+err.Error(), "")
+			return
+		}
+		_ = sendMessage(strconv.FormatInt(chatID, 10),
+			"✅ Đã gửi yêu cầu thêm bạn vào lịch trực với @"+username+
+				". Quản trị viên sẽ duyệt trên dashboard.", "")
 		return
 	}
 

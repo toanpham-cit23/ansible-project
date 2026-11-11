@@ -1051,6 +1051,38 @@ func handleLogs(w http.ResponseWriter, r *http.Request, u *User) {
 	case "critical":
 		where = append(where, "e.severity IN ('average','high','disaster')")
 	}
+	// Ten fixed categories. They are message patterns rather than a new column
+	// because the events table is written by three different producers and a
+	// category column would be wrong for every row written before today.
+	// Each entry is (key, human label, SQL predicate).
+	switch q.Get("cat") {
+	case "state":
+		where = append(where, "e.message LIKE 'state %'")
+	case "reach":
+		where = append(where, "e.message LIKE '%unreachable%'")
+	case "reboot":
+		where = append(where, "(e.message LIKE '%restart%' OR e.message LIKE '%power loss%')")
+	case "config":
+		where = append(where, "(e.message LIKE '%config%' OR e.message LIKE '%vlan%' OR e.message LIKE '%route%')")
+	case "security":
+		where = append(where, "(e.message LIKE '%login%' OR e.message LIKE '%auth%' OR e.message LIKE '%denied%' OR e.message LIKE '%blocked%')")
+	case "terminal":
+		where = append(where, "e.message LIKE 'terminal:%'")
+	case "lease":
+		where = append(where, "(e.message LIKE '%lease%' OR e.message LIKE '%arp%' OR e.message LIKE '%new host%')")
+	case "alert":
+		where = append(where, "(e.message LIKE '%alert%' OR e.message LIKE '%delivery%')")
+	case "discovery":
+		where = append(where, "(e.message LIKE '%discover%' OR e.message LIKE '%unknown%' OR e.message LIKE '%unidentified%')")
+	case "other":
+		where = append(where, "(e.message NOT LIKE 'state %' AND e.message NOT LIKE '%unreachable%'"+
+			" AND e.message NOT LIKE '%restart%' AND e.message NOT LIKE '%power loss%'"+
+			" AND e.message NOT LIKE '%config%' AND e.message NOT LIKE '%vlan%' AND e.message NOT LIKE '%route%'"+
+			" AND e.message NOT LIKE '%login%' AND e.message NOT LIKE '%auth%' AND e.message NOT LIKE '%denied%' AND e.message NOT LIKE '%blocked%'"+
+			" AND e.message NOT LIKE 'terminal:%' AND e.message NOT LIKE '%lease%' AND e.message NOT LIKE '%arp%'"+
+			" AND e.message NOT LIKE '%alert%' AND e.message NOT LIKE '%delivery%'"+
+			" AND e.message NOT LIKE '%discover%' AND e.message NOT LIKE '%unknown%' AND e.message NOT LIKE '%unidentified%')")
+	}
 	if search := strings.TrimSpace(q.Get("q")); search != "" {
 		where = append(where, "(e.message LIKE ? OR d.hostname LIKE ?)")
 		args = append(args, "%"+search+"%", "%"+search+"%")
@@ -1177,6 +1209,7 @@ func main() {
 	ensureLabSchema()
 	ensureTelegramSchema()  // adds shift_admins.telegram + the Telegram ledger tables
 	ensureDiscoverySchema() // B.9 new-device ledger, fed from the poller's ip_leases
+	ensureStaffSchema()     // self-service roster requests from the Telegram group
 	bootstrap()
 
 	mux := http.NewServeMux()
@@ -1261,6 +1294,10 @@ func main() {
 	mux.HandleFunc("GET /api/telegram/incidents", withUser(handleTelegramIncidents))
 	mux.HandleFunc("GET /api/telegram/deliveries", withUser(handleTelegramDeliveries))
 	mux.HandleFunc("PUT /api/telegram/config", withAdmin(handleTelegramConfig))
+	mux.HandleFunc("DELETE /api/telegram/config", withAdmin(handleTelegramDelete))
+	mux.HandleFunc("GET /api/staff/lookup", withAdmin(handleStaffLookup))
+	mux.HandleFunc("GET /api/staff/requests", withUser(handleStaffRequests))
+	mux.HandleFunc("POST /api/staff/requests/{id}", withAdmin(handleStaffDecision))
 	mux.HandleFunc("POST /api/telegram/auth", withUser(handleTelegramAuth))
 	mux.HandleFunc("POST /api/telegram/link-token", withUser(handleTelegramLinkToken))
 	mux.HandleFunc("POST /api/telegram/test", withAdmin(handleTelegramTest))

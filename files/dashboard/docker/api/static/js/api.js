@@ -18,4 +18,5 @@ const api = {
   post: (p, b) => api.call('POST', p, b),
   put: (p, b) => api.call('PUT', p, b),
   patch: (p, b) => api.call('PATCH', p, b),
+  del: (p, b) => api.call('DELETE', p, b),
 };

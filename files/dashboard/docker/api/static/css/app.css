@@ -232,6 +232,11 @@ button.act.on {
 .tp-backup { stroke: var(--ok); stroke-width: 1.5; stroke-dasharray: 6 5; }
 .tp-link { stroke: var(--topo-line); stroke-width: 1.4; }
 .tp-ctrl { stroke: var(--ok); stroke-width: 1.3; stroke-dasharray: 4 5; }
+/* Poll still being attempted but unanswered: blinking, not crossed. */
+.tp-ctrl-blink { stroke: var(--warn); stroke-width: 1.6; stroke-dasharray: 5 5;
+  animation: blinkpath 1.4s linear infinite; }
+@keyframes blinkpath { 0%,100% { opacity: .95; } 50% { opacity: .18; } }
+@media (prefers-reduced-motion: reduce) { .tp-ctrl-blink { animation: none; } }
 .tp-peer { stroke: var(--topo-line); stroke-width: 1.3; stroke-dasharray: 3 4; }
 .tp-access { stroke: var(--topo-line); stroke-width: 1.1; opacity: .55; }
 /* a link that cannot carry traffic, and the cross that says so */
@@ -570,3 +575,28 @@ input.lease-name:focus { border-style: solid; border-color: var(--accent); outli
 .op-kv.tunnel-link a { color: var(--accent); font-weight: 600; word-break: break-all; font-size: 11.5px; }
 .op-kv.tunnel-link a:hover { text-decoration: underline; }
 .ssh-chip.local { color: var(--accent); border-color: var(--accent); }
+
+/* ---- unreachable-but-unidentified: pulsing yellow question mark ---- */
+.pill.q {
+  background: rgba(250, 222, 42, .16); border-color: var(--warn); color: var(--warn);
+  font-weight: 700; min-width: 22px; text-align: center;
+  animation: qpulse 1.1s ease-in-out infinite;
+}
+@keyframes qpulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(250,222,42,.45); }
+  50%      { opacity: .45; box-shadow: 0 0 0 4px rgba(250,222,42,0); }
+}
+@media (prefers-reduced-motion: reduce) { .pill.q { animation: none; } }
+.dev-card.unknown { border-style: dashed; }
+.dev-card.unknown .mini { opacity: .25; }
+
+/* destructive action in Settings */
+.act.danger { color: #fff; background: var(--err); border-color: var(--err); }
+.act.danger:hover { filter: brightness(1.08); }
+
+/* ---- Logs pagination ---- */
+.pager { display: flex; gap: 5px; align-items: center; flex-wrap: wrap;
+  justify-content: center; margin-top: 12px; font-size: 12.5px; }
+.pager button { height: 27px; padding: 0 9px; }
+.pager .pinfo { color: var(--muted); margin: 0 8px; }
+.log-cat { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }

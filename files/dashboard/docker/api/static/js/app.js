@@ -47,6 +47,17 @@ function confirmDialog(title, body, okText) {
   });
 }
 
+// markTg paints the Telegram field red and writes the reason under it.
+function markTg(msg, bad) {
+  const f = $('#sh-telegram');
+  const n = $('#sh-tg-note');
+  if (f) f.style.borderColor = bad ? 'var(--err)' : '';
+  if (n) {
+    n.textContent = msg || '';
+    n.style.color = bad ? 'var(--err)' : 'var(--muted)';
+  }
+}
+
 async function boot() {
   try { state.me = await api.get('/api/me'); } catch (e) { return; }
   applyTheme();
@@ -111,6 +122,22 @@ async function onFocusOut(e) {
 }
 
 async function onChange(e) {
+  if (e.target.id === 'sh-telegram') {
+    const v = (e.target.value || '').trim().replace(/^@/, '');
+    if (!v) { markTg('', false); return; }
+    try {
+      const r = await api.get('/api/staff/lookup?username=' + encodeURIComponent(v));
+      if (r.exists) markTg('Verified in the Telegram group as @' + r.username, false);
+      else markTg('Username not exist', true);
+    } catch (err) { markTg('', false); }
+    return;
+  }
+  if (e.target.id === 'log-cat') {
+    state.logCat = e.target.value; state.logPage = 1; route(); return;
+  }
+  if (e.target.id === 'log-level') {
+    state.logLevel = e.target.value; state.logPage = 1; route(); return;
+  }
   const sel = e.target.closest('select.log-act');
   if (!sel) return;
   try {
@@ -134,6 +161,13 @@ async function onClick(e) {
   const b = e.target.closest('button');
   if (!b) return;
 
+  if (b.dataset.logtab) {
+    state.logTab = b.dataset.logtab;
+    if (b.dataset.logtab === 'entries') state.logPage = 1;
+    route();
+    return;
+  }
+
   // ---- Telegram incident alerts (server re-checks role on every write)
   if (b.dataset.act === 'tg-save') {
     try {
@@ -143,6 +177,19 @@ async function onClick(e) {
         bot_username: ($('#tg-bot') || {}).value || '',
       });
       toast('Telegram configuration saved; token encrypted at rest');
+      route();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+  if (b.dataset.act === 'tg-delete') {
+    const ok = await confirmDialog('Delete this bot?',
+      'Xoá token và CHAT_ID khỏi dashboard. Bot trên Telegram vẫn tồn tại, nhưng '
+      + 'hệ thống sẽ không gửi được cảnh báo cho tới khi cấu hình lại. Thao tác này không hoàn tác được.',
+      'Delete bot');
+    if (!ok) return;
+    try {
+      await api.del('/api/telegram/config');
+      toast('Telegram bot configuration deleted');
       route();
     } catch (err) { toast(err.message, true); }
     return;
@@ -301,18 +348,32 @@ async function onClick(e) {
   if (b.dataset.act === 'shift-add') {
     const days = [...document.querySelectorAll('.sh-day:checked')].map((x) => x.value);
     const name = ($('#sh-name') || {}).value || '';
-    const email = ($('#sh-email') || {}).value || '';
-    if (!name.trim() || !email.includes('@')) {
-      toast('A name and a valid email are required', true);
+    const tgName = (($('#sh-telegram') || {}).value || '').trim().replace(/^@/, '');
+    if (!name.trim()) { toast('A name is required', true); return; }
+    if (!tgName) {
+      markTg('Telegram username is required', true);
+      toast('Telegram username is required', true);
       return;
     }
+    // Ask the bot before writing: the roster must not contain a name the bot
+    // has never seen, because an on-call entry that cannot be pinged is worse
+    // than no entry at all.
+    try {
+      const chk = await api.get('/api/staff/lookup?username=' + encodeURIComponent(tgName));
+      if (!chk.exists) {
+        markTg('Username not exist', true);
+        toast('Username not exist', true);
+        return;
+      }
+      markTg('', false);
+    } catch (err) { toast(err.message, true); return; }
     const editing = state.shiftEdit ? Number(state.shiftEdit) : 0;
     try {
       await api.put('/api/shifts', {
         ...(editing ? { id: editing } : {}),
-        name: name.trim(), email: email.trim(),
+        name: name.trim(), email: (tgName + '@telegram.local'),
         phone: ($('#sh-phone') || {}).value || '',
-        telegram: ($('#sh-telegram') || {}).value || '',
+        telegram: tgName,
         role: ($('#sh-role') || {}).value || 'primary',
         starts_at: ($('#sh-start') || {}).value || '00:00',
         ends_at: ($('#sh-end') || {}).value || '23:59',
@@ -320,6 +381,23 @@ async function onClick(e) {
       });
       toast(editing ? 'Administrator updated' : 'Administrator added');
       state.shiftEdit = null;
+      route();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
+
+  if (b.dataset.act === 'staff-approve' || b.dataset.act === 'staff-decline') {
+    const approve = b.dataset.act === 'staff-approve';
+    const ok = await confirmDialog(approve ? 'Approve this person?' : 'Decline this request?',
+      approve
+        ? 'Thêm người này vào lịch trực. Chỉ làm được khi bot đã thấy họ trong nhóm Telegram.'
+        : 'Từ chối yêu cầu. Người này có thể gửi lại /addstaff sau.',
+      approve ? 'Approve' : 'Decline');
+    if (!ok) return;
+    try {
+      await api.post('/api/staff/requests/' + b.dataset.id,
+        { action: approve ? 'approve' : 'decline' });
+      toast(approve ? 'Added to the roster' : 'Request declined');
       route();
     } catch (err) { toast(err.message, true); }
     return;
@@ -837,21 +915,21 @@ function labTopology(t, leases) {
     const plan = upOf(i);
     const [rx, ry] = rPt[i];
     const dead = r.last_state !== 'up';
-    const draw = (list, cls, traced) => list.forEach((si) => {
-      const [sx, sy] = sPt[si];
-      const [ax, ay] = edgeOf(rx, ry, RW, RH, sx, sy);
-      const [bx, by] = edgeOf(sx, sy, SW, SH, rx, ry);
-      const path = traced && via[si] === i ? macsOn(si).join(' ') : '';
-      if (dead) {
-        line(ax, ay, bx, by, 'tp-blocked', path);
-        cross((ax + bx) / 2, (ay + by) / 2, path);
-      } else {
+    // A device we cannot identify has no known cabling. Drawing guessed links
+    // to the switches would be an assertion the data does not support, so the
+    // only path kept is the one that is measured: the controller's poll.
+    if (!dead) {
+      const draw = (list, cls, traced) => list.forEach((si) => {
+        const [sx, sy] = sPt[si];
+        const [ax, ay] = edgeOf(rx, ry, RW, RH, sx, sy);
+        const [bx, by] = edgeOf(sx, sy, SW, SH, rx, ry);
+        const path = traced && via[si] === i ? macsOn(si).join(' ') : '';
         line(ax, ay, bx, by, cls, path);
-      }
-    });
-    // the spare is a real path when the primary dies, so it is traced too
-    draw(plan.backup, 'tp-backup', true);
-    draw(plan.primary, 'tp-primary', true);
+      });
+      // the spare is a real path when the primary dies, so it is traced too
+      draw(plan.backup, 'tp-backup', true);
+      draw(plan.primary, 'tp-primary', true);
+    }
   });
 
   // ---- control plane: the controller polls every router, so every router gets
@@ -864,8 +942,9 @@ function labTopology(t, leases) {
       const [ax, ay] = edgeOf(ctrlPt[0], ctrlPt[1], CW, CH, p[0], p[1]);
       const [bx, by] = edgeOf(p[0], p[1], RW, RH, ctrlPt[0], ctrlPt[1]);
       if (r.last_state !== 'up') {
-        line(ax, ay, bx, by, 'tp-blocked', path);
-        cross((ax + bx) / 2, (ay + by) / 2, path);
+        // blinking, not crossed: the poll is still being attempted, it is just
+        // not answered. A cross means "cut on purpose".
+        line(ax, ay, bx, by, 'tp-ctrl-blink', path);
       } else {
         line(ax, ay, bx, by, 'tp-ctrl', path);
       }
@@ -1137,6 +1216,29 @@ function focusPath(mac, keep) {
   svg.classList.toggle('tp-focus', !!on);
 }
 
+// Ten fixed categories, matching the SQL predicates in handleLogs. Kept here so
+// the label and the filter cannot drift apart.
+const LOG_CATS = [
+  ['all', 'All categories'],
+  ['state', '1. Device state changes'],
+  ['reach', '2. Unreachable'],
+  ['reboot', '3. Restart / power loss'],
+  ['config', '4. Config & routing'],
+  ['security', '5. Security & login'],
+  ['terminal', '6. Terminal commands'],
+  ['lease', '7. Leases & ARP'],
+  ['alert', '8. Alerts & delivery'],
+  ['discovery', '9. Discovery'],
+  ['other', '10. Other'],
+];
+
+function logTabs(active) {
+  const t = (k, l) => `<button class="act${k === active ? ' primary' : ''}" data-logtab="${k}">${l}</button>`;
+  return `<div class="row" style="margin-bottom:10px;gap:6px">`
+    + t('entries', 'Log entries') + t('analysis', 'Analysis') + t('alerts', 'Alerts & delivery')
+    + `</div>`;
+}
+
 const views = {
   async dashboard() {
     const devs = await api.get('/api/devices');
@@ -1215,14 +1317,23 @@ const views = {
       const badge = isLocal
         ? '<span class="ssh-chip local" title="This is the machine running the dashboard">Local host</span>'
         : `<span class="ssh-chip ${sshUp ? 'ok' : 'err'}" title="TCP/22 probe from the controller${ssh ? ' · ' + ssh.ssh_probe_ms + ' ms' : ''}">SSH ${sshUp ? 'up' : 'down'}</span>`;
+      // A box that never answered is not "down": we do not know what it is.
+      // It gets a pulsing yellow question mark instead of a red failure badge,
+      // and no terminal button, because a shell to a device we cannot identify
+      // is a guess, not an operation.
+      const unknown = d.last_state !== 'up';
       const foot = isLocal
         ? '<span class="muted" style="font-size:11.5px">Managed locally - no remote console</span>'
-        : `<button class="act" data-act="term" data-id="${d.id}">Terminal console</button>`;
-      return `<div class="dev-card${d.last_state === 'up' ? '' : ' down'}" data-id="${d.id}">
+        : (unknown
+            ? '<span class="muted" style="font-size:11.5px">Unidentified - console disabled</span>'
+            : `<button class="act" data-act="term" data-id="${d.id}">Terminal console</button>`);
+      return `<div class="dev-card${unknown ? ' down unknown' : ''}" data-id="${d.id}">
         <div class="dev-head"><b>${esc(d.hostname)}</b>
           <span class="row" style="gap:6px">
             ${badge}
-            <span class="pill ${d.last_state === 'up' ? 'up' : 'down'}">${d.last_state || 'unknown'}</span>
+            ${unknown
+              ? '<span class="pill q" title="No response - device not identified">?</span>'
+              : '<span class="pill up">up</span>'}
           </span></div>
         <canvas class="mini" data-dev="${d.id}"></canvas>
         <div class="dev-nums">
@@ -1455,11 +1566,22 @@ const views = {
 
 
   async logs() {
+    // Logs, Analysis and Alerts are one section now: they all answer "what
+    // happened and did anyone hear about it". The tab bar is the only place
+    // that knows they used to be separate pages.
+    const tab = state.logTab || 'entries';
+    if (tab === 'analysis' || tab === 'alerts') {
+      if (tab === 'analysis') await views.analysis(); else await views.alerts();
+      const inner = $('#view').innerHTML;
+      $('#view').innerHTML = logTabs(tab) + inner;
+      return;
+    }
     const page = state.logPage || 1;
     const level = state.logLevel || 'all';
+    const cat = state.logCat || 'all';
     const q = state.logQuery || '';
     const data = await api.get('/api/logs?page=' + page + '&per_page=10&level=' + level +
-                               '&q=' + encodeURIComponent(q));
+                               '&cat=' + encodeURIComponent(cat) + '&q=' + encodeURIComponent(q));
     state.logPage = data.page;
 
     const CHIP = { info: 'chip-info', warning: 'chip-warn', critical: 'chip-crit' };
@@ -1505,19 +1627,16 @@ const views = {
     const label = level === 'all' ? 'All categories' : level[0].toUpperCase() + level.slice(1);
     const body = `
       <div class="row log-toolbar">
-        <div class="filter-wrap">
-          <button class="act" data-act="log-filter" title="Filter by category" style="display:inline-flex;align-items:center;gap:7px;height:34px;white-space:nowrap">
-            <svg class="ic" viewBox="0 0 24 24" style="width:15px;height:15px;flex:0 0 auto"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 5.4h16.8l-6.6 7.6v6.2l-3.6 1.8v-8z"/></g></svg>
-            ${label}
-          </button>
-          <div class="filter-menu${state.logFilterOpen ? ' open' : ''}">
-            <button data-level="all">All</button>
-            <button data-level="info">Info</button>
-            <button data-level="warning">Warning</button>
-            <button data-level="critical">Critical</button>
-          </div>
-        </div>
-        <input id="log-q" placeholder="search message or device" value="${esc(q)}" style="width:260px">
+        <select id="log-cat" style="height:34px;min-width:190px">
+          ${LOG_CATS.map(([k, l]) => `<option value="${k}"${k === cat ? ' selected' : ''}>${l}</option>`).join('')}
+        </select>
+        <select id="log-level" style="height:34px">
+          <option value="all"${level === 'all' ? ' selected' : ''}>All levels</option>
+          <option value="info"${level === 'info' ? ' selected' : ''}>Info</option>
+          <option value="warning"${level === 'warning' ? ' selected' : ''}>Warning</option>
+          <option value="critical"${level === 'critical' ? ' selected' : ''}>Critical</option>
+        </select>
+        <input id="log-q" placeholder="search message or device" value="${esc(q)}" style="width:240px">
         <button class="act" data-act="log-search">Search</button>
         <span class="muted" style="margin-left:auto">${data.total} entr${data.total === 1 ? 'y' : 'ies'}</span>
       </div>
@@ -1537,7 +1656,7 @@ const views = {
         <b>Allow</b> marks it as expected.
       </p>`;
 
-    $('#view').innerHTML = section('logs', 'Logs', body, true);
+    $('#view').innerHTML = logTabs('entries') + section('logs', 'Logs', body, true);
   },
   async database() {
     const devs = await api.get('/api/devices');
@@ -1675,7 +1794,23 @@ const views = {
     // 403 on PUT /api/telegram/config (4.1c defense in depth).
     const t = await api.get('/api/telegram/status').catch(() => ({}));
     const chip = (ok, label) => `<span class="chip ${ok ? 'chip-ok' : 'chip-warn'}">${label}</span>`;
-    const tgForm = admin ? `
+    // Once a bot is configured the inputs disappear: leaving them on screen
+    // invites someone to paste a token into a form that no longer needs one,
+    // and the token is the bot's password. Only "send a test" and the
+    // destructive "delete this bot" remain.
+    const configured = !!(t.token_set && t.chat_id_set);
+    const tgForm = !admin ? '' : (configured ? `
+      <div class="panel" style="margin-top:9px">
+        <div class="p-title" style="text-align:left;margin-bottom:9px">Bot configuration (admin only)</div>
+        <p class="muted" style="font-size:12.5px;margin:0 0 10px">
+          Bot đã được cấu hình. Token và CHAT_ID không hiển thị lại.
+          ${t.env_override ? 'Giá trị đang đọc từ biến môi trường nên không xoá được ở đây.' : ''}
+        </p>
+        <div class="row" style="justify-content:flex-end">
+          <button class="act" data-act="tg-test">Send test alert</button>
+          <button class="act danger" data-act="tg-delete" ${t.env_override ? 'disabled title="Token đang lấy từ env"' : ''}>Delete this bot</button>
+        </div>
+      </div>` : `
       <div class="panel" style="margin-top:9px">
         <div class="p-title" style="text-align:left;margin-bottom:9px">Bot configuration (admin only)</div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:9px">
@@ -1688,14 +1823,13 @@ const views = {
             <input id="tg-bot" placeholder="YOUR_BOT_USERNAME_HERE" style="width:100%;margin-top:4px"></label>
         </div>
         <p class="muted" style="font-size:11.5px;margin-top:8px">
-          Để trống ô token để giữ nguyên; dán <span class="mono">YOUR_BOT_TOKEN_HERE</span> để xoá token đã lưu.
-          Giá trị thật lấy từ BotFather và chỉ nên đưa qua biến môi trường hoặc ô này.
+          Giá trị thật lấy từ BotFather; token được mã hoá AES-GCM trước khi lưu.
+          Sau khi lưu, các ô nhập sẽ được ẩn và chỉ còn nút gửi thử và nút xoá bot.
         </p>
         <div class="row" style="margin-top:11px;justify-content:flex-end">
-          <button class="act" data-act="tg-test">Send test alert</button>
           <button class="act primary" data-act="tg-save">Save configuration</button>
         </div>
-      </div>` : '';
+      </div>`);
     const tgBody = `
       <div class="panel" style="padding:12px 14px">
         <div class="row" style="gap:8px;flex-wrap:wrap">
@@ -1809,9 +1943,13 @@ const views = {
 
   // --------------------------------------------------------------- shifts
   async shifts() {
-    const d = await api.get('/api/shifts');
+    const [d, sr] = await Promise.all([
+      api.get('/api/shifts'),
+      api.get('/api/staff/requests').catch(() => ({ requests: [], pending: 0 })),
+    ]);
     const admin = state.me.role === 'admin';
     const cur = d.current;
+    const pending = (sr.requests || []).filter((x) => x.status === 'pending');
 
     const banner = cur
       ? `<div class="panel" style="margin-bottom:10px;border-left:3px solid var(--accent)">
@@ -1820,7 +1958,7 @@ const views = {
                <div class="muted" style="font-size:11.5px;text-transform:uppercase;letter-spacing:.06em">
                  On call now</div>
                <div style="font-size:17px;margin-top:3px"><b>${esc(cur.name)}</b>
-                 <span class="muted" style="font-size:13px">&lt;${esc(cur.email)}&gt;</span></div>
+                 ${cur.telegram ? `<span class="muted" style="font-size:13px">@${esc(cur.telegram)}</span>` : ''}</div>
                <div class="muted" style="font-size:12.5px;margin-top:2px">
                  ${esc(cur.role)} \u00b7 chosen by ${esc(cur.source)}
                  ${d.handover ? `\u00b7 handover at ${esc(d.handover.ts)} (${esc(d.handover.reason)})` : ''}
@@ -1840,8 +1978,6 @@ const views = {
     const rows = d.admins.length ? d.admins.map((a) => `
       <tr data-shift="${a.id}" class="${a.id === onId ? 'oncall' : ''}">
         <td><b>${esc(a.name)}</b>${a.id === onId ? ' <span class="chip chip-ok">on call</span>' : ''}${a.active ? '' : ' <span class="muted">(inactive)</span>'}</td>
-        <td class="mono">${esc(a.email)}</td>
-        <td class="mono">${a.telegram ? '@' + esc(a.telegram) : '<span class="muted">—</span>'}</td>
         <td>${esc(a.role)}</td>
         <td class="mono">${esc(a.starts_at)}\u2013${esc(a.ends_at)}</td>
         <td class="mono" style="font-size:11.5px">${esc((a.days || []).join(' '))}</td>
@@ -1852,7 +1988,7 @@ const views = {
                        ${a.id === onId ? 'On call' : 'Make on-call'}</button>` : ''}
         </td>
       </tr>`).join('')
-      : `<tr><td colspan="7" class="muted" style="text-align:center;padding:22px">No administrators yet.</td></tr>`;
+      : `<tr><td colspan="5" class="muted" style="text-align:center;padding:22px">No administrators yet.</td></tr>`;
 
     const ed = state.shiftEdit ? d.admins.find((a) => a.id === Number(state.shiftEdit)) : null;
     const v = (k, fb) => esc(ed ? (ed[k] ?? fb) : fb);
@@ -1863,13 +1999,12 @@ const views = {
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px">
           <label class="muted" style="font-size:12px">Name<br>
             <input id="sh-name" style="width:100%;margin-top:4px" value="${v('name', '')}"></label>
-          <label class="muted" style="font-size:12px">Email<br>
-            <input id="sh-email" style="width:100%;margin-top:4px" value="${v('email', '')}"></label>
+          <label class="muted" style="font-size:12px">Telegram (@username)<br>
+            <input id="sh-telegram" placeholder="@username" autocomplete="off"
+                   style="width:100%;margin-top:4px" value="${v('telegram', '')}">
+            <span id="sh-tg-note" style="display:block;font-size:11.5px;margin-top:3px"></span></label>
           <label class="muted" style="font-size:12px">Phone<br>
             <input id="sh-phone" style="width:100%;margin-top:4px" value="${v('phone', '')}"></label>
-          <label class="muted" style="font-size:12px">Telegram (@username)<br>
-            <input id="sh-telegram" placeholder="@username" style="width:100%;margin-top:4px"
-                   value="${v('telegram', '')}"></label>
           <label class="muted" style="font-size:12px">Role<br>
             <select id="sh-role" style="width:100%;margin-top:4px">
               <option value="primary"${ed && ed.role === 'backup' ? '' : ' selected'}>primary</option>
@@ -1891,10 +2026,36 @@ const views = {
         </div>
       </div>` : '';
 
+    const reqRows = (sr.requests || []).slice(0, 20).map((x) => `
+      <tr>
+        <td><b>@${esc(x.username || '?')}</b>${x.display_name && x.display_name !== x.username ? ' <span class="muted">(' + esc(x.display_name) + ')</span>' : ''}</td>
+        <td class="mono" style="font-size:11.5px">${esc(x.telegram_id)}</td>
+        <td class="muted mono" style="font-size:11.5px">${esc(x.created_at)}</td>
+        <td class="status-col"><span class="pill ${x.status === 'approved' ? 'up' : (x.status === 'declined' ? 'down' : 'q')}">${esc(x.status)}</span></td>
+        <td style="text-align:right">${admin && x.status === 'pending' ? `
+          <button class="act primary" data-act="staff-approve" data-id="${x.id}">Approve</button>
+          <button class="act" data-act="staff-decline" data-id="${x.id}">Decline</button>` : ''}</td>
+      </tr>`).join('');
+
+    const reqPanel = `
+      <div class="panel" style="margin-top:10px;padding:4px 8px">
+        <div class="p-title" style="text-align:left;margin:8px 4px 4px">
+          Staff requests from the Telegram group${pending.length ? ` <span class="chip chip-warn">${pending.length} pending</span>` : ''}</div>
+        <table>
+          <thead><tr><th>Telegram</th><th>ID</th><th>Requested</th><th>Status</th><th></th></tr></thead>
+          <tbody>${reqRows || '<tr><td colspan="5" class="muted" style="text-align:center;padding:18px">Nobody has asked yet. A group member sends <span class="mono">/addstaff</span> to the bot.</td></tr>'}</tbody>
+        </table>
+        <p class="muted" style="font-size:12px;margin:8px 4px 6px">
+          Thành viên nhóm gửi <span class="mono">/addstaff &lt;mã&gt;</span> cho bot; bot tự lấy
+          <span class="mono">@username</span> từ chính tin nhắn nên không ai mạo danh được.
+          Quản trị viên duyệt ở đây trước khi người đó vào lịch trực.
+        </p>
+      </div>`;
+
     const body = banner + `
       <div class="panel" style="padding:4px 8px">
         <table>
-          <thead><tr><th>Name</th><th>Email</th><th>Telegram</th><th>Role</th><th>Hours</th>
+          <thead><tr><th>Name</th><th>Role</th><th>Hours</th>
             <th>Days</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -1912,7 +2073,7 @@ const views = {
         trực (hoặc toàn bộ follower nếu không có ca trực). Bot không lấy được
         danh sách thành viên group qua Bot API, nên roster là nguồn duy nhất.
       </p>` + form;
-    $('#view').innerHTML = section('shifts', 'Shift roster and on-call', body, true);
+    $('#view').innerHTML = section('shifts', 'Shift roster and on-call', body + reqPanel, true);
     if (ed) {
       const f = $('#shift-form');
       if (f && f.scrollIntoView) f.scrollIntoView({ block: 'nearest' });
@@ -1960,7 +2121,7 @@ const views = {
           ${d.counts.sent} sent \u00b7 ${d.counts.failed} failed \u00b7
           ${d.counts.suppressed} suppressed by cooldown</span>
         <span style="margin-left:auto"></span>
-        ${admin ? `<button class="act" data-act="alert-test">Send test mail</button>
+        ${admin ? `
                    <button class="act" data-act="alert-redispatch">Re-send open alerts</button>` : ''}
       </div>
       <div class="panel" style="padding:4px 8px;margin-bottom:10px">
@@ -2460,12 +2621,12 @@ async function renderStatusbar() {
     sbItem('SQLite', true, d.db_size || '—', 'Database file size on the controller'),
     sbItem('Backups', bk.ok === true ? true : null, bk.last_snapshot || 'none', bk.message),
     sbItem('Next clearance', true, d.next_clearance || '—', '1 Jan / 1 Jul at 03:00 UTC'),
-    // Replaces the old top-right "Gap analysis →" link (task 3). The label
-    // follows the linked Telegram account; the deep link is created
-    // server-side, single-use, and only over https://t.me/.
-    `<button class="sb-tg" data-act="tg-login" type="button"
-       title="${esc(tg.linked ? 'Mở bot Telegram' : 'Liên kết tài khoản Telegram')}">
-       ${tg.linked ? 'Login as @' + esc(tg.telegram_username || '') : 'Login to Telegram'}</button>`,
+    // Top-right is now the group invitation, not a per-user login. Joining the
+    // group is what makes the bot able to reach a person; the per-user link
+    // only recorded a username, which the roster no longer asks for.
+    `<a class="sb-tg" href="https://t.me/+RJDUhlPh_GQ2MTRl" target="_blank"
+        rel="noopener noreferrer" title="Tham gia nhóm Telegram của team">
+        Join Telegram group</a>`,
   ].join('');
 }
 
