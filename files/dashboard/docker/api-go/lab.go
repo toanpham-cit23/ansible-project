@@ -4,10 +4,13 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/binary"
+	stdhtml "html"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/smtp"
@@ -1776,6 +1779,31 @@ func handleDeleteDNS(w http.ResponseWriter, r *http.Request, u *User) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// renderMailHTML fills the shared branded template. Both containers mount the
+// same /data volume, so the design can be changed without rebuilding an image.
+// An empty string means "no template", and callers fall back to plain text.
+func renderMailHTML(subject, body, to, transport string) string {
+	b, err := os.ReadFile(env("MAIL_TEMPLATE", "/data/mail-template.html"))
+	if err != nil {
+		return ""
+	}
+	subs := map[string]string{
+		"{{TITLE}}":      stdhtml.EscapeString(subject),
+		"{{BADGE}}":      "Notification",
+		"{{TIMESTAMP}}":  time.Now().Format("02 Jan 2006, 15:04"),
+		"{{BODY_HTML}}":  strings.ReplaceAll(stdhtml.EscapeString(body), "\n", "<br>"),
+		"{{SOURCE}}":     "lab-api &middot; 192.168.23.10",
+		"{{TRANSPORT}}":  stdhtml.EscapeString(transport),
+		"{{RECIPIENT}}":  stdhtml.EscapeString(to),
+		"{{HOSTNAME}}":   "ansiblelabcsn340.duckdns.org",
+	}
+	t := string(b)
+	for k, v := range subs {
+		t = strings.ReplaceAll(t, k, v)
+	}
+	return t
+}
+
 // ---------------------------------------------------------------- mail shim
 
 // mailSend mirrors the poller's mail path: an SMTP relay when one is
@@ -1784,6 +1812,87 @@ func handleDeleteDNS(w http.ResponseWriter, r *http.Request, u *User) {
 // even with no mail server in the lab.
 func mailSend(to, subject, body string) (ok bool, errText string, transport string) {
 	from := env("MAIL_FROM", "lab@localhost")
+
+	// HTTPS mail-API transport. A direct-to-MX send from a residential IP with
+	// no PTR record is refused by Gmail no matter how correct the SMTP
+	// conversation is; an HTTPS POST has no PTR to fail and needs no SMTP port
+	// in either direction, so it also works behind CGNAT.
+	if strings.EqualFold(env("MAIL_TRANSPORT", ""), "formsubmit") {
+		// No-signup HTTPS mail API. The recipient goes in the URL, so this
+		// works for any shift-admin address; each new address needs a one-time
+		// activation click on FormSubmit's side.
+		origin := env("MAIL_API_ORIGIN", "https://ansiblelabcsn340.duckdns.org")
+		u := "https://formsubmit.co/ajax/" + to
+		// Only "message": extra fields become ugly label/value rows in
+		// FormSubmit's wrapper. "basic" is its least decorated template.
+		payload, _ := json.Marshal(map[string]any{
+			"message": body,
+			"_subject": subject,
+			"_captcha": "false",
+			"_template": "basic",
+		})
+		req, reqErr := http.NewRequest(http.MethodPost, u, bytes.NewReader(payload))
+		if reqErr != nil {
+			return false, "formsubmit build: " + reqErr.Error(), "formsubmit"
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		// FormSubmit rejects requests that do not look like a form on a web page.
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Referer", origin+"/")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36")
+		client := &http.Client{Timeout: 15 * time.Second}
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			return false, "formsubmit: " + doErr.Error(), "formsubmit"
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		// HTTP 200 is returned even for a logical rejection, and "success"
+		// arrives as a JSON string ("true"/"false"), so use `any`.
+		var j struct {
+			Success any    `json:"success"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(raw, &j) != nil {
+			return false, fmt.Sprintf("formsubmit unparseable: %s", raw[:min(len(raw), 150)]), "formsubmit"
+		}
+		if fmt.Sprint(j.Success) == "true" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return true, "", "formsubmit"
+		}
+		return false, fmt.Sprintf("formsubmit %d %s", resp.StatusCode, j.Message), "formsubmit"
+	}
+
+	if env("MAIL_TRANSPORT", "") == "api" {
+		if u := env("MAIL_API_URL", ""); u != "" {
+			fields := map[string]any{
+				"from": from, "to": []string{to},
+				"subject": subject, "text": body,
+			}
+			if rendered := renderMailHTML(subject, body, to, "HTTPS mail API"); rendered != "" {
+				fields["html"] = rendered
+			}
+			payload, _ := json.Marshal(fields)
+			req, reqErr := http.NewRequest(http.MethodPost, u, bytes.NewReader(payload))
+			if reqErr != nil {
+				return false, "api build: " + reqErr.Error(), "api"
+			}
+			req.Header.Set("Authorization", "Bearer "+env("MAIL_API_KEY", ""))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("User-Agent", "lab-api/1.0")
+			client := &http.Client{Timeout: 12 * time.Second}
+			resp, doErr := client.Do(req)
+			if doErr != nil {
+				return false, "api: " + doErr.Error(), "api"
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				slurp, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+				return false, fmt.Sprintf("api %d %s", resp.StatusCode, slurp), "api"
+			}
+			return true, "", "api"
+		}
+	}
 	host := env("SMTP_HOST", "")
 	if host != "" {
 		port := envInt("SMTP_PORT", 25)

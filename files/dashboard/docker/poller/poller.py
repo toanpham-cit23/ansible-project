@@ -37,6 +37,15 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "25"))
 SMTP_USER = os.environ.get("SMTP_USER", "").strip()
 SMTP_PASS = os.environ.get("SMTP_PASS", "").strip()
+
+# HTTPS mail-API transport. This exists because a direct-to-MX send from a
+# residential IP with no PTR record is refused by Gmail et al. no matter how
+# correct the SMTP conversation is. An HTTPS API call has no PTR to fail and
+# needs no SMTP port in either direction, so it works behind CGNAT.
+MAIL_TRANSPORT = os.environ.get("MAIL_TRANSPORT", "").strip().lower()
+MAIL_API_URL = os.environ.get("MAIL_API_URL", "").strip()
+MAIL_API_KEY = os.environ.get("MAIL_API_KEY", "").strip()
+MAIL_TEMPLATE = os.environ.get("MAIL_TEMPLATE", "/data/mail-template.html").strip()
 SMTP_TLS = os.environ.get("SMTP_TLS", "0") == "1"
 MAIL_FROM = os.environ.get("MAIL_FROM", "lab-dashboard@localhost").strip()
 # When no SMTP relay is configured we still want a visible trace, so mail is
@@ -785,6 +794,145 @@ def oncall_state(c):
     return a, handover, overdue, due_at
 
 
+def render_mail_html(subject, body, to_addr, transport):
+    """Render the shared branded HTML template from /data/mail-template.html.
+
+    Both containers mount the same volume, so the design can be edited without
+    rebuilding an image. Returns "" when the template is unavailable, which
+    makes callers fall back to a plain-text message.
+    """
+    import html as _html
+    try:
+        with open(MAIL_TEMPLATE, encoding="utf-8") as f:
+            t = f.read()
+    except OSError:
+        return ""
+    esc = _html.escape
+    subs = {
+        "{{TITLE}}": esc(subject),
+        "{{BADGE}}": "Notification",
+        "{{TIMESTAMP}}": time.strftime("%d %b %Y, %H:%M", time.localtime()),
+        "{{BODY_HTML}}": esc(body).replace("\n", "<br>"),
+        "{{SOURCE}}": "lab-poller &middot; 192.168.23.10",
+        "{{TRANSPORT}}": esc(transport),
+        "{{RECIPIENT}}": esc(to_addr),
+        "{{HOSTNAME}}": "ansiblelabcsn340.duckdns.org",
+    }
+    for k, v in subs.items():
+        t = t.replace(k, v)
+    return t
+
+
+def _send_via_formsubmit(to_addr, subject, body):
+    """Send through FormSubmit's no-signup HTTPS endpoint.
+
+    FormSubmit puts the recipient in the URL, so this works for any shift-admin
+    address (each new address needs a one-time activation click). It returns
+    HTTP 200 even when it *rejects* a submission, so the JSON body decides
+    success, not the status code.
+    """
+    import json
+    import urllib.parse
+    import urllib.request
+    import urllib.error
+
+    origin = os.environ.get("MAIL_API_ORIGIN", "").strip() or \
+        "https://ansiblelabcsn340.duckdns.org"
+    url = "https://formsubmit.co/ajax/" + urllib.parse.quote(to_addr, safe="@.+-_")
+    # Only "message" is sent: extra fields show up as ugly label/value rows in
+    # FormSubmit's wrapper. "basic" is its least decorated template.
+    payload = json.dumps({
+        "message": body,
+        "_subject": subject,
+        "_captcha": "false",
+        "_template": "basic",
+    }).encode()
+    req = urllib.request.Request(url, data=payload, method="POST", headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        # FormSubmit refuses requests that look like they came from a local
+        # file rather than a form served over HTTPS.
+        "Origin": origin,
+        "Referer": origin + "/",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120 Safari/537.36",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = r.read().decode(errors="replace")[:500]
+            code = r.getcode()
+        if not (200 <= code < 300):
+            return False, "formsubmit status %s" % code
+        try:
+            j = json.loads(raw)
+        except Exception:
+            return False, "formsubmit unparseable: %s" % raw[:150]
+        # FormSubmit sends success as a *string* ("true"/"false"), but accept
+        # a real bool too in case they change the shape.
+        if str(j.get("success")).lower() == "true":
+            return True, None
+        return False, ("formsubmit %s" % j.get("message", raw))[:300]
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode(errors="replace")[:200]
+        except Exception:
+            pass
+        return False, ("formsubmit %s %s" % (e.code, detail)).strip()[:300]
+    except Exception as e:
+        return False, ("formsubmit %s" % e)[:300]
+
+
+def _send_via_api(to_addr, subject, body, msg):
+    """POST the message to an HTTPS mail API.
+
+    Uses the Resend/SendGrid-style JSON shape. Returns (ok, error). Nothing
+    here touches SMTP, so no PTR record, no port 25 and no relay credential
+    on the host are involved.
+    """
+    import json
+    import urllib.request
+    import urllib.error
+
+    rendered = render_mail_html(subject, body, to_addr, "HTTPS mail API")
+    fields = {
+        "from": MAIL_FROM,
+        "to": [to_addr],
+        "subject": subject,
+        "text": body,
+    }
+    if rendered:
+        fields["html"] = rendered
+    payload = json.dumps(fields).encode()
+    req = urllib.request.Request(
+        MAIL_API_URL,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": "Bearer " + MAIL_API_KEY,
+            "Content-Type": "application/json",
+            # Some providers reject requests that carry no User-Agent.
+            "User-Agent": "lab-poller/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            code = r.getcode()
+            if 200 <= code < 300:
+                return True, None
+            return False, "api status %s" % code
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode(errors="replace")[:200]
+        except Exception:
+            pass
+        return False, ("api %s %s" % (e.code, detail)).strip()[:300]
+    except Exception as e:
+        return False, ("api %s" % e)[:300]
+
+
 def send_mail(to_addr, subject, body):
     """Return (ok, error, transport)."""
     msg = EmailMessage()
@@ -794,6 +942,14 @@ def send_mail(to_addr, subject, body):
     msg["Date"] = formatdate(localtime=True)
     msg["Message-ID"] = make_msgid(domain="lab.local")
     msg.set_content(body)
+
+    if MAIL_TRANSPORT == "formsubmit":
+        ok, err = _send_via_formsubmit(to_addr, subject, body)
+        return ok, err, "formsubmit"
+
+    if MAIL_TRANSPORT == "api" and MAIL_API_URL and MAIL_API_KEY:
+        ok, err = _send_via_api(to_addr, subject, body, msg)
+        return ok, err, "api"
 
     if SMTP_HOST:
         try:
