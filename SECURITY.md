@@ -66,28 +66,31 @@ anything reachable from an untrusted network.
 This is a personal lab. Open an issue rather than expecting a private
 disclosure channel.
 
-## CRLF line endings in committed shell scripts
+## CRLF line endings in `run_backup.sh`
 
-Every `.sh` file in this repository is stored in git with CRLF line endings,
-so `#!/bin/sh` is followed by a carriage return. On Linux/Alpine that is a
-`bad interpreter: /bin/sh^M` failure, not a warning — the script will not run
-until the file is converted.
+One committed script, `run_backup.sh`, is stored in git with CRLF line
+endings, so its `#!/bin/sh` is followed by a carriage return. On Linux/Alpine
+that is a `bad interpreter: /bin/sh^M` failure, not a warning — the script will
+not run until the file is converted. The other fourteen `.sh` files are stored
+with LF and are fine; this is not a repository-wide problem.
 
-This is a working-copy artefact: `core.autocrlf=true` on a Windows checkout
-normalises on checkout, not on commit, so the CRLF that the working tree sees
-gets stored back into the blob. Files added from a machine without that
-setting store LF correctly.
+The cause is a Windows working copy with `core.autocrlf=true` where the file
+was committed with CRLF already in the working tree. Files added from a
+checkout without that setting store LF correctly, which is why the rest are
+clean.
 
-Fix, from a clone with LF in the index:
+Fix:
 
-    git config --local core.autocrlf false
-    git rm --cached -r . && git reset --hard
-    git add --renormalize .
-    git commit -m "Normalise line endings to LF"
+    tr -d '\r' < run_backup.sh > run_backup.sh.tmp && mv run_backup.sh.tmp run_backup.sh
+    git add run_backup.sh
+    git commit -m "Store run_backup.sh with LF line endings"
 
-Verify before pushing:
+Verify — count CRLF blobs across tracked scripts, expecting only the ones you
+intend to keep:
 
-    git ls-files '*.sh' | xargs -r file | grep CRLF    # must print nothing
+    git ls-files '*.sh' | while read f; do
+      git cat-file -p "HEAD:$f" | grep -q $'\r' && echo "CRLF: $f"
+    done
 
-Until that is done, do not `scp` or clone these scripts onto the controller
-without converting them (`sed -i 's/\r$//' script.sh`) first.
+Until that is done, convert before use on the controller:
+`sed -i 's/\r$//' run_backup.sh`.
