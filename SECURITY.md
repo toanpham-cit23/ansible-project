@@ -65,3 +65,29 @@ anything reachable from an untrusted network.
 
 This is a personal lab. Open an issue rather than expecting a private
 disclosure channel.
+
+## CRLF line endings in committed shell scripts
+
+Every `.sh` file in this repository is stored in git with CRLF line endings,
+so `#!/bin/sh` is followed by a carriage return. On Linux/Alpine that is a
+`bad interpreter: /bin/sh^M` failure, not a warning — the script will not run
+until the file is converted.
+
+This is a working-copy artefact: `core.autocrlf=true` on a Windows checkout
+normalises on checkout, not on commit, so the CRLF that the working tree sees
+gets stored back into the blob. Files added from a machine without that
+setting store LF correctly.
+
+Fix, from a clone with LF in the index:
+
+    git config --local core.autocrlf false
+    git rm --cached -r . && git reset --hard
+    git add --renormalize .
+    git commit -m "Normalise line endings to LF"
+
+Verify before pushing:
+
+    git ls-files '*.sh' | xargs -r file | grep CRLF    # must print nothing
+
+Until that is done, do not `scp` or clone these scripts onto the controller
+without converting them (`sed -i 's/\r$//' script.sh`) first.
