@@ -79,6 +79,12 @@ was committed with CRLF already in the working tree. Files added from a
 checkout without that setting store LF correctly, which is why the rest are
 clean.
 
+`ansible.cfg`, `host_vars/*.yml` and most of `playbooks/*.yml` also carry CRLF
+in their blobs. That is harmless — YAML and INI parsers accept CRLF, and only
+the shebang line of an executable is sensitive to it. Leave them alone rather
+than producing a 15-file whitespace diff; if you do normalise, do it as its own
+commit so the real changes stay reviewable.
+
 Fix:
 
     tr -d '\r' < run_backup.sh > run_backup.sh.tmp && mv run_backup.sh.tmp run_backup.sh
