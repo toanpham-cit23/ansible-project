@@ -58,6 +58,18 @@ function markTg(msg, bad) {
   }
 }
 
+// markEm is the e-mail twin of markTg: same treatment, separate field, because
+// the two channels are validated by different rules and must not share state.
+function markEm(msg, bad) {
+  const f = $('#sh-email');
+  const n = $('#sh-em-note');
+  if (f) f.style.borderColor = bad ? 'var(--err)' : '';
+  if (n) {
+    n.textContent = msg || '';
+    n.style.color = bad ? 'var(--err)' : 'var(--muted)';
+  }
+}
+
 async function boot() {
   try { state.me = await api.get('/api/me'); } catch (e) { return; }
   applyTheme();
@@ -130,6 +142,21 @@ async function onChange(e) {
       if (r.exists) markTg('Verified in the Telegram group as @' + r.username, false);
       else markTg('Username not exist', true);
     } catch (err) { markTg('', false); }
+    return;
+  }
+  // Local shape check only - there is no way to prove a mailbox exists without
+  // sending to it, so this catches typos and placeholders and stops short of
+  // claiming the address works.
+  if (e.target.id === 'sh-email') {
+    const v = (e.target.value || '').trim();
+    if (!v) { markEm('', false); return; }
+    if (/@telegram\.local$/i.test(v)) {
+      markEm('Placeholder domain — use a real mailbox', true); return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) {
+      markEm('Not a valid address', true); return;
+    }
+    markEm('Looks valid — delivery is only proven by an actual send', false);
     return;
   }
   // The monitoring page redraws every 5 s. Without this the half-typed name is
@@ -354,29 +381,51 @@ async function onClick(e) {
     const days = [...document.querySelectorAll('.sh-day:checked')].map((x) => x.value);
     const name = ($('#sh-name') || {}).value || '';
     const tgName = (($('#sh-telegram') || {}).value || '').trim().replace(/^@/, '');
+    const email = (($('#sh-email') || {}).value || '').trim();
     if (!name.trim()) { toast('A name is required', true); return; }
-    if (!tgName) {
-      markTg('Telegram username is required', true);
-      toast('Telegram username is required', true);
+
+    // The two channels are independent, so each is checked on its own terms.
+    // At least one has to work: a roster entry nobody can reach is the exact
+    // failure this page exists to prevent.
+    if (!tgName && !email) {
+      markEm('Set a Telegram username, an e-mail address, or both', true);
+      toast('Set a Telegram username, an e-mail address, or both', true);
       return;
     }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      markEm('That address is not valid', true);
+      toast('That e-mail address is not valid', true);
+      return;
+    }
+    if (/@telegram\.local$/i.test(email)) {
+      markEm('Use a real mailbox, not a placeholder', true);
+      toast('A real e-mail address is required', true);
+      return;
+    }
+    markEm('', false);
+
     // Ask the bot before writing: the roster must not contain a name the bot
     // has never seen, because an on-call entry that cannot be pinged is worse
-    // than no entry at all.
-    try {
-      const chk = await api.get('/api/staff/lookup?username=' + encodeURIComponent(tgName));
-      if (!chk.exists) {
-        markTg('Username not exist', true);
-        toast('Username not exist', true);
-        return;
-      }
+    // than no entry at all. Only applies when a username was given.
+    if (tgName) {
+      try {
+        const chk = await api.get('/api/staff/lookup?username=' + encodeURIComponent(tgName));
+        if (!chk.exists) {
+          markTg('Username not exist', true);
+          toast('Username not exist', true);
+          return;
+        }
+        markTg('', false);
+      } catch (err) { toast(err.message, true); return; }
+    } else {
       markTg('', false);
-    } catch (err) { toast(err.message, true); return; }
+    }
     const editing = state.shiftEdit ? Number(state.shiftEdit) : 0;
     try {
       await api.put('/api/shifts', {
         ...(editing ? { id: editing } : {}),
-        name: name.trim(), email: (tgName + '@telegram.local'),
+        name: name.trim(),
+        email: email,
         phone: ($('#sh-phone') || {}).value || '',
         telegram: tgName,
         role: ($('#sh-role') || {}).value || 'primary',
@@ -2075,10 +2124,22 @@ const views = {
     // the banner above it: "who holds the pager" is the question this page
     // exists to answer, so it has to be visible where the names are.
     const onId = cur ? cur.id : null;
-    const rows = d.admins.length ? d.admins.map((a) => `
+    const rows = d.admins.length ? d.admins.map((a) => {
+      // Show each channel on its own so a gap is visible in the table itself:
+      // "no e-mail" and "no Telegram" are different outages, not one blank.
+      const noMail = !a.email || /@telegram\.local$/i.test(a.email);
+      const tgCell = a.telegram
+        ? `<span class="mono">@${esc(a.telegram)}</span>`
+        : '<span class="muted" title="no Telegram username on file">\u2014</span>';
+      const emCell = noMail
+        ? '<span class="muted" title="no usable e-mail address on file">\u2014</span>'
+        : `<span class="mono" style="font-size:11.5px">${esc(a.email)}</span>`;
+      return `
       <tr data-shift="${a.id}" class="${a.id === onId ? 'oncall' : ''}">
         <td><b>${esc(a.name)}</b>${a.id === onId ? ' <span class="chip chip-ok">on call</span>' : ''}${a.active ? '' : ' <span class="muted">(inactive)</span>'}</td>
         <td>${esc(a.role)}</td>
+        <td>${tgCell}</td>
+        <td>${emCell}</td>
         <td class="mono">${esc(a.starts_at)}\u2013${esc(a.ends_at)}</td>
         <td class="mono" style="font-size:11.5px">${esc((a.days || []).join(' '))}</td>
         <td style="text-align:right">
@@ -2087,8 +2148,9 @@ const views = {
                        ${a.id === onId ? 'disabled title="Already on call"' : ''}>
                        ${a.id === onId ? 'On call' : 'Make on-call'}</button>` : ''}
         </td>
-      </tr>`).join('')
-      : `<tr><td colspan="5" class="muted" style="text-align:center;padding:22px">No administrators yet.</td></tr>`;
+      </tr>`;
+    }).join('')
+      : `<tr><td colspan="7" class="muted" style="text-align:center;padding:22px">No administrators yet.</td></tr>`;
 
     const ed = state.shiftEdit ? d.admins.find((a) => a.id === Number(state.shiftEdit)) : null;
     const v = (k, fb) => esc(ed ? (ed[k] ?? fb) : fb);
@@ -2099,10 +2161,6 @@ const views = {
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px">
           <label class="muted" style="font-size:12px">Name<br>
             <input id="sh-name" style="width:100%;margin-top:4px" value="${v('name', '')}"></label>
-          <label class="muted" style="font-size:12px">Telegram (@username)<br>
-            <input id="sh-telegram" placeholder="@username" autocomplete="off"
-                   style="width:100%;margin-top:4px" value="${v('telegram', '')}">
-            <span id="sh-tg-note" style="display:block;font-size:11.5px;margin-top:3px"></span></label>
           <label class="muted" style="font-size:12px">Phone<br>
             <input id="sh-phone" style="width:100%;margin-top:4px" value="${v('phone', '')}"></label>
           <label class="muted" style="font-size:12px">Role<br>
@@ -2115,6 +2173,39 @@ const views = {
           <label class="muted" style="font-size:12px">To<br>
             <input id="sh-end" style="width:100%;margin-top:4px" value="${v('ends_at', '17:00')}"></label>
         </div>
+
+        <!-- Two delivery channels, configured separately. They fail for
+             different reasons and are verified in different ways: Telegram
+             needs a @username the bot has actually seen in the group, e-mail
+             needs a mailbox somebody reads. Keeping them apart is what stops
+             a placeholder being written into the address column. -->
+        <div class="grid" style="margin-top:11px;gap:10px">
+          <div class="card">
+            <div class="k">Telegram</div>
+            <label class="muted" style="font-size:12px;display:block;margin-top:8px">@username<br>
+              <input id="sh-telegram" placeholder="@username" autocomplete="off"
+                     style="width:100%;margin-top:4px" value="${v('telegram', '')}">
+              <span id="sh-tg-note" style="display:block;font-size:11.5px;margin-top:3px"></span></label>
+            <p class="muted" style="font-size:11.5px;margin:7px 0 0">
+              Incident mentions in the group. Verified against the bot's own
+              member list — the username must exist before it can be saved.
+            </p>
+          </div>
+          <div class="card">
+            <div class="k">E-Mail</div>
+            <label class="muted" style="font-size:12px;display:block;margin-top:8px">Address<br>
+              <input id="sh-email" type="email" placeholder="name@example.com" autocomplete="off"
+                     style="width:100%;margin-top:4px" value="${v('email', '')}">
+              <span id="sh-em-note" style="display:block;font-size:11.5px;margin-top:3px"></span></label>
+            <p class="muted" style="font-size:11.5px;margin:7px 0 0">
+              Where alert mail is sent. Use a mailbox someone actually reads —
+              a made-up domain silently swallows every alert.
+            </p>
+          </div>
+        </div>
+        <p class="muted" style="font-size:11.5px;margin:8px 0 0">
+          Set at least one of the two. With both, alerts go out on both channels.
+        </p>
         <div class="row" style="margin-top:9px">
           <span class="muted" style="font-size:12px">Days</span>
           ${DAYS.map((x) => `<label class="muted" style="font-size:12px">
@@ -2155,7 +2246,7 @@ const views = {
     const body = banner + `
       <div class="panel" style="padding:4px 8px">
         <table>
-          <thead><tr><th>Name</th><th>Role</th><th>Hours</th>
+          <thead><tr><th>Name</th><th>Role</th><th>Telegram</th><th>E-mail</th><th>Hours</th>
             <th>Days</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -2172,6 +2263,14 @@ const views = {
         <i>Telegram</i> và tự join group; hệ thống chỉ mention đúng người đang
         trực (hoặc toàn bộ follower nếu không có ca trực). Bot không lấy được
         danh sách thành viên group qua Bot API, nên roster là nguồn duy nhất.
+      </p>
+      <p class="muted" style="font-size:12px;margin-top:6px">
+        <b>Telegram và E-Mail là hai kênh riêng.</b> Telegram dùng để mention
+        trong group; E-Mail dùng để gửi thư cảnh báo tới hộp thư cá nhân. Mỗi
+        kênh kiểm tra theo cách khác nhau: Telegram đối chiếu với danh sách
+        thành viên bot đã thấy, còn E-Mail chỉ kiểm tra hình thức — chỉ một lần
+        gửi thật mới chứng minh được hộp thư tồn tại. Khai báo một kênh cũng
+        đủ; khai báo cả hai thì cảnh báo đi bằng cả hai đường.
       </p>` + form;
     $('#view').innerHTML = section('shifts', 'Shift roster and on-call', body + reqPanel, true);
     if (ed) {
