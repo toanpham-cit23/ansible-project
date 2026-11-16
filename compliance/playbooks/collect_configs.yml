@@ -1,0 +1,18 @@
+---
+- name: Collect FRR running configuration for compliance audit
+  hosts: routers
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Read FRR running configuration
+      ansible.builtin.shell: "TERM=dumb vtysh -c 'show running-config'"
+      register: frr_config
+      changed_when: false
+      failed_when: frr_config.rc != 0 or (frr_config.stdout | trim | length == 0)
+
+    - name: Save configuration on Controller
+      ansible.builtin.copy:
+        content: "{{ frr_config.stdout }}\n"
+        dest: "{{ playbook_dir }}/../reports/actual/{{ inventory_hostname }}.conf"
+        mode: '0600'
+      delegate_to: localhost

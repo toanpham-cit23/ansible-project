@@ -1215,6 +1215,7 @@ func main() {
 	ensureTelegramSchema()   // adds shift_admins.telegram + the Telegram ledger tables
 	ensureDiscoverySchema()  // B.9 new-device ledger, fed from the poller's ip_leases
 	ensureStaffSchema()      // self-service roster requests from the Telegram group
+	ensureComplianceSchema() // read-only FRR configuration compliance history
 	ensureDeviceProtection() // r1/r2/r3/controller must never be auto-deleted
 	bootstrap()
 
@@ -1224,6 +1225,7 @@ func main() {
 	mux.HandleFunc("POST /api/logout", withUser(handleLogout))
 	mux.HandleFunc("GET /api/me", withUser(handleMe))
 	mux.HandleFunc("GET /api/summary", withUser(handleSummary))
+	mux.HandleFunc("GET /api/compliance", withUser(handleCompliance))
 	mux.HandleFunc("GET /api/devices", withUser(handleDevices))
 	mux.HandleFunc("PATCH /api/devices/{id}", withAdmin(handlePatchDevice))
 	mux.HandleFunc("PUT /api/devices/{id}/credentials", withAdmin(handleCredentials))

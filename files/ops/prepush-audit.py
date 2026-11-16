@@ -10,7 +10,13 @@ import re
 import subprocess
 import sys
 
-REPO = "/root/ansible-project"
+# Default to the repository this file lives in, so the guard works from any
+# checkout instead of only from the controller's /root/ansible-project. A
+# hardcoded REPO meant that running it anywhere else raised FileNotFoundError
+# out of subprocess(cwd=...) rather than reporting CLEAN or BLOCKED.
+REPO = os.environ.get("PREPUSH_REPO") or os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 CONFIGS = ["/root/lab/.env", "/root/lab/ops/duckdns.env", f"{REPO}/hosts.ini"]
 
 # Only values long enough to be meaningful are scanned. Two-character lab
@@ -45,6 +51,19 @@ def secrets():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
+            # Inventory lines carry credentials inline:
+            #   r1 ansible_host=... ansible_password=secret
+            # That line never matches the key=value regex below (its first token
+            # is the hostname, followed by a space, not = or :), so this scan
+            # must happen before that regex can `continue` past it. It used to
+            # sit after the `if not m: continue`, which made it unreachable and
+            # left inline inventory passwords unchecked.
+            for im in re.finditer(
+                    r"(?:ansible_password|ansible_ssh_pass|ansible_become_pass)"
+                    r"\s*=\s*[\"']?([^\s\"']+)", line):
+                v = im.group(1)
+                if len(v) >= MIN_LEN:
+                    out.add(v)
             m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*(.+)$", line)
             if not m:
                 continue
@@ -53,15 +72,23 @@ def secrets():
                 continue
             if len(val) >= MIN_LEN and not val.startswith(("{{", "$", "<")):
                 out.add(val)
-            # ansible_password=... may sit inline in an INI line
-            for im in re.finditer(r"ansible_password=(\S+)", line):
-                v = im.group(1)
-                if len(v) >= MIN_LEN:
-                    out.add(v)
     return out
 
 
 def staged_paths():
+    """Paths git is about to commit: the index if anything is staged, else a
+    dry-run of `add -A`.
+
+    `git add -A -n` only lists files that are *not yet* staged, so once
+    `git add -A` has run it prints nothing and the guard audited zero files
+    while still reporting CLEAN. Prefer the real index when it is non-empty,
+    and fall back to the dry-run only when nothing is staged yet.
+    """
+    r = subprocess.run(["git", "diff", "--cached", "--name-only"],
+                       cwd=REPO, capture_output=True, text=True)
+    tracked = [p for p in r.stdout.splitlines() if p.strip()]
+    if tracked:
+        return tracked
     r = subprocess.run(["git", "add", "-A", "-n"], cwd=REPO,
                        capture_output=True, text=True)
     return re.findall(r"add '([^']+)'", r.stdout)

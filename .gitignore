@@ -70,6 +70,14 @@ __pycache__/
 dashboard.tar.gz
 dash-ansible.tar.gz
 
+# --- Go compliance collector build output ---
+# compliance/go is source; compliance/bin holds the compiled binary that
+# run.sh prefers. A committed binary would silently drift out of sync with
+# the source it was built from, which is exactly the failure mode this port
+# is meant to avoid.
+compliance/bin/
+compliance/go/compliance
+
 # Local backup copies kept outside the tracked tree
 .local-backups/
 
@@ -117,3 +125,10 @@ temp/
 *.docx
 *.pdf.report
 
+compliance/reports/latest.json
+compliance/reports/actual/*.conf
+
+# _baseline.py rebuilds these on every run (it unlinks the .db and rewrites the
+# .conf fixtures). Committing them would ship a stale snapshot as if it were
+# source, and the .db is a binary blob that diffs as noise.
+compliance/tests/baseline_work/

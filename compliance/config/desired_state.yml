@@ -1,0 +1,23 @@
+# Regex được tìm trên output `vtysh -c "show running-config"`.
+routers:
+  r1:
+    required_patterns:
+      - '^hostname\s+r1$'
+      - '^router ospf$'
+      - '^\s*network 192\.168\.23\.0/24 area 0$'
+      - '^\s*network 1\.1\.1\.1/32 area 0$'
+      - '^\s*passive-interface lo$'
+  r2:
+    required_patterns:
+      - '^hostname\s+r2$'
+      - '^router ospf$'
+      - '^\s*network 192\.168\.23\.0/24 area 0$'
+      - '^\s*network 2\.2\.2\.2/32 area 0$'
+      - '^\s*passive-interface lo$'
+  r3:
+    required_patterns:
+      - '^hostname\s+r3$'
+      - '^router ospf$'
+      - '^\s*network 192\.168\.23\.0/24 area 0$'
+      - '^\s*network 3\.3\.3\.3/32 area 0$'
+      - '^\s*passive-interface lo$'

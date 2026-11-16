@@ -2685,6 +2685,24 @@ const views = {
   // ------------------------------------------------------- gap analysis
   // A separate section, not a widget: the audit is a written record of what
   // the dashboard was missing and which of those gaps were actually closed.
+  async compliance() {
+    const data = await api.get('/api/compliance');
+    const x = data.latest;
+    const pill = (v) => `<span class="pill ${v === 'COMPLIANT' ? 'up' : (v === 'NON_COMPLIANT' ? 'err' : 'down')}">${esc(v || 'NO DATA')}</span>`;
+    const summary = x ? `<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px">
+      <div class="panel"><div class="p-title">Overall status</div><div style="margin-top:8px">${pill(x.status)}</div></div>
+      <div class="panel"><div class="p-title">Compliant</div><div class="p-big">${x.devices_compliant}</div></div>
+      <div class="panel"><div class="p-title">Non-compliant</div><div class="p-big">${x.devices_noncompliant}</div></div>
+      <div class="panel"><div class="p-title">Errors / no config</div><div class="p-big">${x.devices_error}</div></div></div>
+      <p class="muted" style="font-size:12px">Last audit: ${esc(x.checked_at)} · Run #${x.id}</p>` : '<div class="panel">Chưa có kết quả. Hãy chạy lệnh compliance trên Controller trước.</div>';
+    const rows=(data.findings||[]).map(f=>`<tr><td><b>${esc(f.hostname)}</b></td><td>${pill(f.status)}</td><td class="mono">${esc(f.rule)}</td><td class="muted">${esc(f.detail)}</td></tr>`).join('');
+    const hist=(data.history||[]).map(h=>`<tr><td>${esc(h.checked_at)}</td><td>${pill(h.status)}</td><td>${h.devices_compliant}/${h.devices_total}</td><td>${h.devices_noncompliant}</td><td>${h.devices_error}</td></tr>`).join('');
+    $('#view').innerHTML = section('compliance-summary','Configuration compliance', summary, true) +
+      section('compliance-findings','Latest rule results', `<div class="panel"><table><thead><tr><th>Router</th><th>Status</th><th>Rule</th><th>Detail</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">No findings yet</td></tr>'}</tbody></table></div>`, true) +
+      section('compliance-history','Audit history', `<div class="panel"><table><thead><tr><th>Checked at</th><th>Status</th><th>Compliant</th><th>Non-compliant</th><th>Errors</th></tr></thead><tbody>${hist || '<tr><td colspan="5" class="muted">No history</td></tr>'}</tbody></table></div>`, true) +
+      `<p class="muted" style="font-size:12px;margin-top:10px">Read-only audit. Dashboard does not change router configuration.</p>`;
+  },
+
   async gapanalysis() {
     const [g, ops] = await Promise.all([
       api.get('/api/ops/gaps').catch(() => ({ gaps: [] })),
