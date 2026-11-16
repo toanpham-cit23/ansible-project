@@ -116,6 +116,16 @@ def main():
         for rel, why in leaks:
             print(f"  BLOCKED {rel}: {why}")
         sys.exit(1)
+    if not paths:
+        # Nothing staged and nothing untracked: there is no commit to guard.
+        # Say so, rather than printing CLEAN next to "0 files" where it reads
+        # as a pass over the whole tree.
+        print("pre-push audit: NOTHING TO CHECK (no staged or untracked files)")
+        return
+    if not sec:
+        print("pre-push audit: CLEAN (filename check only - no live configs "
+              "found to compare values against)")
+        return
     print("pre-push audit: CLEAN")
 
 
