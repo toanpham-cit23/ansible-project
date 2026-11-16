@@ -76,22 +76,53 @@ def secrets():
 
 
 def staged_paths():
-    """Paths git is about to commit: the index if anything is staged, else a
-    dry-run of `add -A`.
+    """Every path that `git add -A && git commit` would include.
 
-    `git add -A -n` only lists files that are *not yet* staged, so once
-    `git add -A` has run it prints nothing and the guard audited zero files
-    while still reporting CLEAN. Prefer the real index when it is non-empty,
-    and fall back to the dry-run only when nothing is staged yet.
+    Two sources, unioned:
+      - the index (`git diff --cached --name-only`), for files already staged;
+      - a dry run (`git add -A -n`), for modified/untracked files not staged.
+
+    Neither alone is enough. The dry run omits files that are already staged,
+    and the index omits files that are not. Choosing one over the other left a
+    hole: the push playbook runs this audit *before* its own `git add -A`, so
+    a leftover staged file from an aborted run made the guard look only at the
+    index and skip every unstaged edit that was about to be committed.
     """
-    r = subprocess.run(["git", "diff", "--cached", "--name-only"],
-                       cwd=REPO, capture_output=True, text=True)
-    tracked = [p for p in r.stdout.splitlines() if p.strip()]
-    if tracked:
-        return tracked
-    r = subprocess.run(["git", "add", "-A", "-n"], cwd=REPO,
-                       capture_output=True, text=True)
-    return re.findall(r"add '([^']+)'", r.stdout)
+    staged = subprocess.run(["git", "diff", "--cached", "--name-only"],
+                            cwd=REPO, capture_output=True, text=True)
+    pending = subprocess.run(["git", "add", "-A", "-n"], cwd=REPO,
+                             capture_output=True, text=True)
+    paths = [p for p in staged.stdout.splitlines() if p.strip()]
+    # Git quotes paths containing spaces or non-ASCII in the dry run. `add -n`
+    # output looks like: add 'path/to/file'
+    paths += re.findall(r"add '([^']+)'", pending.stdout)
+    return sorted(set(paths))
+
+
+def file_texts(rel):
+    """All versions of a path that could end up in the commit.
+
+    Check both the index blob and the working-tree file. Reading only the
+    working tree misses a secret that was staged and then removed from disk;
+    reading only the index misses an unstaged secret that `git add -A` in the
+    push playbook is about to stage. A path can legitimately have both, so
+    return both rather than choosing one.
+    """
+    texts = []
+    p = os.path.join(REPO, rel)
+    try:
+        if os.path.isfile(p) and os.path.getsize(p) <= 4_000_000:
+            texts.append(open(p, errors="ignore").read())
+    except OSError:
+        pass
+    try:
+        r = subprocess.run(["git", "show", f":{rel}"], cwd=REPO,
+                           capture_output=True, check=False)
+        if r.returncode == 0 and len(r.stdout) <= 4_000_000:
+            texts.append(r.stdout.decode("utf-8", "ignore"))
+    except OSError:
+        pass
+    return texts
 
 
 def main():
@@ -101,16 +132,10 @@ def main():
     for rel in paths:
         if BAD_NAMES.search(rel):
             leaks.append((rel, "sensitive filename"))
-        p = os.path.join(REPO, rel)
-        if not os.path.isfile(p) or os.path.getsize(p) > 4_000_000:
-            continue
-        try:
-            txt = open(p, errors="ignore").read()
-        except OSError:
-            continue
-        for v in sec:
-            if v in txt:
-                leaks.append((rel, "live secret value"))
+        if any(v in txt for txt in file_texts(rel) for v in sec):
+            # One report per file even when the value appears in both the
+            # index blob and the working tree (or in several lines).
+            leaks.append((rel, "live secret value"))
     print(f"pre-push audit: {len(paths)} files, {len(sec)} secret values checked")
     if leaks:
         for rel, why in leaks:

@@ -74,10 +74,12 @@ that is a `bad interpreter: /bin/sh^M` failure, not a warning — the script wil
 not run until the file is converted. The other fourteen `.sh` files are stored
 with LF and are fine; this is not a repository-wide problem.
 
-The cause is a Windows working copy with `core.autocrlf=true` where the file
-was committed with CRLF already in the working tree. Files added from a
-checkout without that setting store LF correctly, which is why the rest are
-clean.
+The cause is a checkout where `core.autocrlf` was off or unset when this file
+was committed, so the CRLF bytes were stored verbatim. With `core.autocrlf=true`
+Git converts CRLF to LF on **commit** (verified: a CRLF scratch file added here
+stores LF in the index), so re-committing this file from a checkout with that
+setting is sufficient. The other scripts were added from such a checkout and
+store LF.
 
 `ansible.cfg`, `host_vars/*.yml` and most of `playbooks/*.yml` also carry CRLF
 in their blobs. That is harmless — YAML and INI parsers accept CRLF, and only
@@ -91,12 +93,18 @@ Fix:
     git add run_backup.sh
     git commit -m "Store run_backup.sh with LF line endings"
 
-Verify — count CRLF blobs across tracked scripts, expecting only the ones you
-intend to keep:
+Verify — count carriage returns in each stored blob and print the paths that
+have any. Expect `run_backup.sh` before the fix and nothing after it:
 
     git ls-files '*.sh' | while read f; do
-      git cat-file -p "HEAD:$f" | grep -q $'\r' && echo "CRLF: $f"
+      n=$(git cat-file -p "HEAD:$f" | tr -cd '\r' | wc -c)
+      [ "$n" -gt 0 ] && echo "CRLF: $f ($n CRs)"
     done
+
+Use `tr`, not `grep -q $'\r'`. GNU grep on Git Bash drops a literal CR from a
+command-line pattern and reports no match even against a file that contains
+one — a verification command that silently passes on the exact file it should
+catch is worse than no verification command.
 
 Until that is done, convert before use on the controller:
 `sed -i 's/\r$//' run_backup.sh`.
