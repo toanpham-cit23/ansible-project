@@ -19,19 +19,53 @@ they remain readable in the git history and in any existing fork.
 `hosts.ini.example` is the committed template; it carries `CHANGE_ME` and
 holds no usable value.
 
+**Status checked 2026-11-18.** The repository is still **public** (verified by
+an unauthenticated `git ls-remote` succeeding), so everything above remains
+world-readable regardless of untracking.
+
 ### What still has to happen
 
 Rotation is the only remediation that matters, and it happens outside this
 repository:
 
-- [ ] Change the `root` password on r1, r2 and r3.
+- [x] **`root` SSH password on r1, r2, r3 — mitigated.** Password
+      authentication is disabled on **all three** routers: `.11`, `.12` and
+      `.13` each offer only `publickey, keyboard-interactive`, so the leaked
+      value cannot be used to log in anywhere.
+      Disabling password auth is a *control*, not a rotation: the leaked string
+      is still the account's password, and it becomes usable again the moment
+      password auth is re-enabled on any host.
 - [ ] Change the seeded dashboard device passwords, or re-run `setup.sh`
       with `DEV_PW_1`, `DEV_PW_2`, `DEV_PW_3` and `DEV_PW_10` set.
 - [ ] Change the SNMP community string and pass it with
-      `-e snmp_community=...`, or use SNMPv3 with auth and priv.
+      `-e snmp_community=...`, or use SNMPv3 with auth and priv. The default
+      `'public'` is still the fallback in `playbooks/04_snmp.yml:79`.
 - [ ] Rotate `ADMIN_PASSWORD` in the dashboard `.env`.
 
-Until those are done, the credentials in the history are live.
+Until those are done, the remaining credentials in the history are live.
+
+### Audit performed 2026-11-18
+
+| Scope | Method | Result |
+| --- | --- | --- |
+| Current tree (102 tracked files) | Pattern scan: GitHub/OpenAI/AWS/Slack/JWT/Telegram/Google key shapes, PEM headers, inline `ansible_password`, creds-in-URL | No live secret. The only matches are `CHANGE_ME` placeholders (`hosts.ini.example`, `main_test.go`), a unit-test token (`telegram_auth_test.go`), and `${DUCKDNS_TOKEN:-…}` indirection |
+| All 474 historical text blobs | Same patterns plus `JWT_SECRET`/`NETDB_KEY`/`ADMIN_PASSWORD`/`TELEGRAM_BOT_TOKEN` assignments | Clean |
+| Files that must never be committed | `git log --all --pretty=format: --name-only` for `.env`, `net.db`, `*.pem`, `*.key`, `vault_pass`, `token.yml`, `id_rsa` | **Never committed at any point** |
+| `hosts.ini` exposure window | `git rev-list HEAD` ∩ blobs containing the path | 17 of 47 commits, **all ancestors of** `6394969`. No commit after the removal carries the file |
+| Pushed binaries | `git ls-files` for `*.exe`, `compliance/bin/` | None tracked |
+
+One correction to an earlier claim: the 2-character passwords in `hosts.ini`
+(`r1`/`r2`/`r3`, identical to the hostnames) are confirmed **unchanged** — the
+historical blob and the current lab inventory hash identically. They are not
+merely old, and that is why disabling password auth mattered more than
+untracking the file did.
+
+Also worth stating plainly: **the `/24`-vs-`/29` OSPF drift recorded in
+`compliance/PORT-REPORT.md` §7 could not be re-confirmed on 2026-11-18.** The
+routers were unreachable for audit because key-based auth also fails
+(`Permission denied (publickey,keyboard-interactive)`), so only password auth
+is known to be closed. Restoring key access is what the compliance audit
+depends on; without it every verdict is historical.
 
 ### What was not done, and why
 
