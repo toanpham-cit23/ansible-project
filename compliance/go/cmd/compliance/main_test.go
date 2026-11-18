@@ -546,24 +546,30 @@ func TestInvalidUTF8IsReplaced(t *testing.T) {
 	}
 }
 
-// TestShippedRulesAgainstRealFRRConfig documents a finding, not a bug in the
-// port.
+// TestShippedRulesAgainstRealFRRConfig pins how the shipped rules grade a real
+// router capture.
 //
-// This is a genuine capture from r1 (FRR 10.6.1) via the native collector. The
-// router is configured correctly for this lab, yet two of the five shipped
-// rules fail against it:
+// This is a genuine capture from r1 (FRR 10.6.1) via the native collector. Two
+// of the five rules used to fail against it, for two unrelated reasons:
 //
 //   - network 192.168.23.0/24 area 0 : that prefix is no longer advertised in
-//     OSPF; the transit links 10.0.1.0/29 and 10.0.3.0/29 replaced it.
-//   - passive-interface lo : FRR 10.6 renders loopback passivation as
-//     "ip ospf passive" under "interface lo", never as "passive-interface lo"
-//     under "router ospf". The rule describes a config shape this FRR version
-//     cannot produce.
+//     OSPF; the transit links 10.0.1.0/29 and 10.0.3.0/29 replaced it. This is
+//     real configuration drift and the rule is LEFT UNCHANGED — it must keep
+//     failing until the lab owner decides whether the /24 or the /29 design is
+//     the intended one.
+//   - passive-interface lo : this was a rule bug, not a router bug. FRR 10.6
+//     renders loopback passivation as "ip ospf passive" under "interface lo",
+//     never as "passive-interface lo" under "router ospf", so a freshly
+//     provisioned router failed a rule no configuration could satisfy. The
+//     shipped rule now accepts both renderings, scoped to the "interface lo"
+//     block so that passivating some other interface cannot satisfy it.
 //
-// Both implementations agree on this result, which is the point: the port is
-// faithful, and the rule set is what needs attention. This test fails if
-// someone "fixes" the Go regexes to make the audit say COMPLIANT — that would
-// silently diverge from Python and hide a real configuration question.
+// The drift finding stays pinned: this test fails if someone widens the /24
+// rule to make the audit report COMPLIANT, which would hide a real discrepancy
+// between the repository and the network. The passivation assertion is also
+// pinned in both directions — the lazy branch must not match a different
+// interface's block — so a future "simplification" back to a bare
+// `ip ospf passive` cannot quietly reintroduce the false pass.
 const realR1Config = `Building configuration...
 
 Current configuration:
@@ -598,40 +604,52 @@ exit
 end
 `
 
+// shippedDesiredPath is the real rule file. Tests below read it rather than
+// duplicating the regexes, because a copy in the test file can drift away from
+// the file that actually grades the lab.
+var shippedDesiredPath = filepath.Join("..", "..", "..", "config", "desired_state.yml")
+
+// loadShippedRules returns the required_patterns for one router from the shipped
+// desired_state.yml, skipping if the file is absent (e.g. a vendored checkout).
+func loadShippedRules(t *testing.T, router string) []string {
+	t.Helper()
+	if _, err := os.Stat(shippedDesiredPath); err != nil {
+		t.Skipf("shipped desired_state.yml not found at %s", shippedDesiredPath)
+	}
+	state, err := loadDesiredState(shippedDesiredPath)
+	if err != nil {
+		t.Fatalf("load shipped desired state: %v", err)
+	}
+	spec, ok := state.Routers[router]
+	if !ok {
+		t.Fatalf("router %q missing from shipped desired state (have %v)", router, state.Order)
+	}
+	patterns := make([]string, len(spec.Rules))
+	for i, r := range spec.Rules {
+		patterns[i] = r.Pattern
+	}
+	return patterns
+}
+
 func TestShippedRulesAgainstRealFRRConfig(t *testing.T) {
+	patterns := loadShippedRules(t, "r1")
+	if len(patterns) != 5 {
+		t.Fatalf("r1 ships %d rules, want 5: %v", len(patterns), patterns)
+	}
+	lanRule, passivationRule := patterns[2], patterns[4]
+
 	cases := []struct {
 		name    string
 		pattern string
 		want    bool
 		why     string
 	}{
-		{
-			name:    "hostname",
-			pattern: `^hostname\s+r1$`,
-			want:    true,
-		},
-		{
-			name:    "ospf process",
-			pattern: `^router ospf$`,
-			want:    true,
-		},
-		{
-			name:    "loopback network",
-			pattern: `^\s*network 1\.1\.1\.1/32 area 0$`,
-			want:    true,
-		},
-		{
-			name:    "LAN network is not in OSPF",
-			pattern: `^\s*network 192\.168\.23\.0/24 area 0$`,
-			want:    false,
-			why:     "192.168.23.0/24 was replaced by the transit links 10.0.1.0/29 and 10.0.3.0/29",
-		},
-		{
-			name:    "passive-interface syntax does not exist in FRR 10.6",
-			pattern: `^\s*passive-interface lo$`,
-			want:    false,
-			why:     "FRR 10.6 emits 'ip ospf passive' under 'interface lo'",
-		},
+		{"hostname", patterns[0], true, ""},
+		{"ospf process", patterns[1], true, ""},
+		{"loopback passivation, FRR 10.6 rendering", passivationRule, true,
+			"FRR 10.6 emits 'ip ospf passive' under 'interface lo'"},
+		{"LAN network is still drifted", lanRule, false,
+			"192.168.23.0/24 was replaced by the transit links 10.0.1.0/29 and 10.0.3.0/29"},
 	}
 
 	for _, tc := range cases {
@@ -640,7 +658,7 @@ func TestShippedRulesAgainstRealFRRConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compile %q: %v", tc.pattern, err)
 			}
-			if got := matchPattern(re, realR1Config); got != tc.want {
+			if got := matchPattern(re, normaliseNewlines(realR1Config)); got != tc.want {
 				msg := ""
 				if tc.why != "" {
 					msg = " (" + tc.why + ")"
@@ -650,37 +668,85 @@ func TestShippedRulesAgainstRealFRRConfig(t *testing.T) {
 		})
 	}
 
-	// The end-to-end verdict for a correctly configured r1 must be
-	// NON_COMPLIANT with exactly these two findings, in file order.
+	// The end-to-end verdict for r1 must be NON_COMPLIANT with exactly one
+	// finding left: the drifted /24. Passivation must no longer appear.
 	dir := t.TempDir()
 	writeActual(t, dir, "r1", realR1Config)
 
-	desired := desiredFrom(t, [][2]any{
-		{"r1", []string{
-			`^hostname\s+r1$`,
-			`^router ospf$`,
-			`^\s*network 192\.168\.23\.0/24 area 0$`,
-			`^\s*network 1\.1\.1\.1/32 area 0$`,
-			`^\s*passive-interface lo$`,
-		}},
-	})
+	desired := desiredFrom(t, [][2]any{{"r1", patterns}})
 
 	devices, err := auditDevices(desired, dir)
 	if err != nil {
 		t.Fatalf("auditDevices: %v", err)
 	}
 	if devices[0].Status != statusNonCompliant {
-		t.Errorf("status = %q; expected NON_COMPLIANT until the rules or the config are reconciled",
+		t.Errorf("status = %q; expected NON_COMPLIANT until the /24 drift is resolved",
 			devices[0].Status)
 	}
-	if len(devices[0].Findings) != 2 {
-		t.Fatalf("findings = %d, want 2: %v", len(devices[0].Findings), devices[0].Findings)
+	if len(devices[0].Findings) != 1 {
+		t.Fatalf("findings = %d, want 1 (only the /24 drift): %v",
+			len(devices[0].Findings), devices[0].Findings)
 	}
-	if devices[0].Findings[0].Rule != `^\s*network 192\.168\.23\.0/24 area 0$` {
-		t.Errorf("first finding = %q", devices[0].Findings[0].Rule)
+	if devices[0].Findings[0].Rule != lanRule {
+		t.Errorf("finding rule = %q, want the /24 drift rule %q",
+			devices[0].Findings[0].Rule, lanRule)
 	}
-	if devices[0].Findings[1].Rule != `^\s*passive-interface lo$` {
-		t.Errorf("second finding = %q", devices[0].Findings[1].Rule)
+}
+
+// TestPassivationRuleIsScopedToLoopback pins the negative direction of the new
+// passivation rule. The lazy branch must only be satisfied by "ip ospf passive"
+// inside the "interface lo" block; the unindented "exit" that closes the block
+// is what stops it from running on into the next interface.
+func TestPassivationRuleIsScopedToLoopback(t *testing.T) {
+	patterns := loadShippedRules(t, "r1")
+	re, err := compilePattern(patterns[len(patterns)-1])
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "FRR 10.6 block form",
+			body: "interface lo\n ip address 1.1.1.1/32\n ip ospf passive\nexit\n",
+			want: true,
+		},
+		{
+			name: "legacy router-level form",
+			body: "router ospf\n network 1.1.1.1/32 area 0\n passive-interface lo\n",
+			want: true,
+		},
+		{
+			name: "passivation on a different interface only",
+			body: "interface lo\n ip address 1.1.1.1/32\nexit\n!\ninterface eth0\n ip ospf passive\nexit\n",
+			want: false,
+		},
+		{
+			name: "loopback present but not passivated",
+			body: "interface lo\n ip address 1.1.1.1/32\n ip ospf cost 10\nexit\n",
+			want: false,
+		},
+		{
+			name: "no loopback block at all",
+			body: "router ospf\n network 1.1.1.1/32 area 0\n",
+			want: false,
+		},
+		{
+			name: "CRLF config, as read by the Python runner",
+			body: "interface lo\r\n ip address 1.1.1.1/32\r\n ip ospf passive\r\nexit\r\n",
+			want: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matchPattern(re, normaliseNewlines(tc.body)); got != tc.want {
+				t.Errorf("match = %v, want %v for %q", got, tc.want, tc.body)
+			}
+		})
 	}
 }
 

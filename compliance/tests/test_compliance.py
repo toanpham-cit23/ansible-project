@@ -43,9 +43,15 @@ class ComplianceTests(unittest.TestCase):
         db = Path(self.tmp.name) / "test.db"
         results = [{"hostname": "r1", "status": "NON_COMPLIANT", "findings": [{"rule": "router ospf", "detail": "missing"}]}]
         run_id = module.save_results(db, results, "2026-11-16T00:00:00+00:00")
-        with sqlite3.connect(db) as con:
+        # Close explicitly: `with sqlite3.connect(...)` only commits, so the
+        # handle survives into tearDown and blocks TemporaryDirectory.cleanup()
+        # on Windows with WinError 32.
+        con = sqlite3.connect(db)
+        try:
             run = con.execute("SELECT status, devices_noncompliant FROM compliance_runs WHERE id=?", (run_id,)).fetchone()
             finding = con.execute("SELECT hostname, rule FROM compliance_findings WHERE run_id=?", (run_id,)).fetchone()
+        finally:
+            con.close()
         self.assertEqual(run, ("NON_COMPLIANT", 1))
         self.assertEqual(finding, ("r1", "router ospf"))
 

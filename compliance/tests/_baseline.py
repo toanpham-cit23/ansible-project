@@ -27,11 +27,20 @@ rc.ACTUAL_DIR = actual
 
 # Fixtures chosen to exercise every branch:
 #   r1 compliant, r2 missing one rule, r3 no snapshot at all (ERROR)
+#
+# r1 uses the FRR 10.6 rendering of loopback passivation ("ip ospf passive"
+# inside the interface block) rather than the legacy "passive-interface lo",
+# so this baseline also pins that the widened rule accepts the real form.
 (actual / "r1.conf").write_text(
     "hostname r1\nrouter ospf\n network 1.1.1.1/32 area 0\n"
-    " network 192.168.23.0/24 area 0\n passive-interface lo\n", encoding="utf-8")
+    " network 192.168.23.0/24 area 0\ninterface lo\n ip address 1.1.1.1/32\n"
+    " ip ospf passive\nexit\n", encoding="utf-8")
 (actual / "r2.conf").write_text(
     "hostname r2\nrouter ospf\n network 2.2.2.2/32 area 0\n", encoding="utf-8")
+
+# The loopback-passive rule, kept in sync with config/desired_state.yml.
+PASSIVE = (r"^(?:[ \t]*passive-interface lo|interface lo\r?$\n"
+           r"(?:[ \t]+[^\n]*\r?\n)*?[ \t]+ip ospf passive)$")
 
 desired = {
     "routers": {
@@ -39,7 +48,7 @@ desired = {
             r"^hostname\s+r1$", r"^router ospf$",
             r"^\s*network 192\.168\.23\.0/24 area 0$",
             r"^\s*network 1\.1\.1\.1/32 area 0$",
-            r"^\s*passive-interface lo$"]},
+            PASSIVE]},
         "r2": {"required_patterns": [
             r"^hostname\s+r2$", r"^router ospf$",
             r"^\s*network 192\.168\.23\.0/24 area 0$"]},

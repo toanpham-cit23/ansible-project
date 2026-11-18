@@ -1,11 +1,13 @@
 # Compliance Runner — Python → Go Port Report
 
-**Date:** 2026-11-16
+**Date:** 2026-11-16, revised 2026-11-18
 **Project:** `ansible-project-compliance-final/ansible-project-main` — `compliance/` add-on
 **Task:** Convert `compliance/scripts/run_compliance.py` to Go; review, verify, implement.
 **Result:** Port complete and **behaviourally identical**. A differential test proves the Go binary reproduces the Python runner's output byte-for-byte, including the JSON report and both SQLite tables.
 
 **Incidental discovery:** the audit surfaced a **drift between the live routers and `playbooks/02_ospf.yml`** — the running OSPF topology no longer matches the repository. See §7; this is an operational finding, not a port defect, and it is the most actionable thing in this report.
+
+**Revision note (2026-11-18).** Re-verified and three items changed, all in §7: the passivation rule was fixed (§7.8), the warning that a pipeline re-run "silently undoes" the manual change was **retracted as factually wrong** (§7.7), and both were re-tested against the differential harness.
 
 ---
 
@@ -106,6 +108,21 @@ match on raw bytes: False                    <- Go without normalisation
 
 `options` grew a `native` field that `parseArgs` never set and `run()` never read, leaving `collectNative` with no caller (a compile error). Fixed by parsing `--native`, `--timeout`, `--verbose`/`-v`, and branching in `run()`.
 
+### 4.4 SQLite handle never closed (found 2026-11-18)
+
+`save_results` used `with sqlite3.connect(path) as con:`. In Python's `sqlite3`, that context manager **commits the transaction but does not close the connection** — it never calls `close()`. The handle therefore stayed open until garbage collection.
+
+On Linux this is invisible: the process exits and the lock goes with it. On Windows the connection holds an exclusive lock on the `.db` file, so `tempfile.TemporaryDirectory.cleanup()` failed with `WinError 32` and `test_compliance.py` reported `FAILED (errors=1)`. The assertion itself had passed; only the teardown broke.
+
+This was **pre-existing, not introduced by the port** — `git stash` on the changes reproduces the identical error against the untouched original. It was fixed anyway, because a suite that always reports one error hides the next real one:
+
+- `run_compliance.py`: `save_results` now wraps the transaction in `try/finally` and calls `con.close()`.
+- `test_compliance.py`: the same pattern in `test_persists_history_and_findings`, which opened the file a second time to read it back.
+
+**Result:** `Ran 4 tests … OK`.
+
+The Go side never had this problem — `openComplianceDB` is followed by a `defer conn.Close()` in every path.
+
 ---
 
 ## 5. Deliberate divergences from Python, and why
@@ -154,7 +171,7 @@ If a snapshot exists but cannot be read, Python raises and aborts the entire run
 
 ### 6.1 Unit tests
 
-**59 tests pass**, `gofmt` clean, `go vet` clean.
+**65 tests pass** (28 top-level plus 37 subtests), `gofmt` clean, `go vet` clean. The Python suite (`test_compliance.py`) is 4/4 green as well.
 
 The first four mirror `test_compliance.py` one-for-one, in the same order, so the two files can be diffed side by side:
 
@@ -163,7 +180,7 @@ The first four mirror `test_compliance.py` one-for-one, in the same order, so th
 - `TestMissingSnapshotIsError`
 - `TestPersistsHistoryAndFindings`
 
-The rest cover the divergences above, the CLI surface, the INI inventory parser, and the JSON wire format.
+The rest cover the divergences above, the CLI surface, the INI inventory parser, and the JSON wire format. `TestPassivationRuleIsScopedToLoopback` was added on 2026-11-18 with the rule fix (§7.8).
 
 ### 6.2 Differential test — the actual proof
 
@@ -178,7 +195,7 @@ compliance_runs identical: [('2026-11-16T00:00:00+00:00', 'ERROR', 3, 1, 1, 1, '
 compliance_findings identical (4 rows)
   (1, 'r1', 'COMPLIANT', 'All required rules', 'Tất cả cấu hình bắt buộc đều được tìm thấy.')
   (1, 'r2', 'NON_COMPLIANT', '^\\s*network 192\\.168\\.23\\.0/24 area 0$', '...')
-  (1, 'r2', 'NON_COMPLIANT', '^\\s*passive-interface lo$', '...')
+  (1, 'r2', 'NON_COMPLIANT', '^(?:[ \\t]*passive-interface lo|interface lo\\r?$\\n...)$', '...')
   (1, 'r3', 'ERROR', 'Configuration collection', '...')
 
 PARITY OK - Go output matches Python byte-for-byte
@@ -186,7 +203,7 @@ PARITY OK - Go output matches Python byte-for-byte
 
 This compares stdout, the `latest.json` document, and both SQLite tables — not "does it look right", but "what exactly does it emit".
 
-On Windows the binary argument needs its `.exe` suffix (`parity.py bin/compliance.exe`); the example above is the Controller form. Re-verified at the end of this session after the report was written — same output, `PARITY OK`.
+On Windows the binary argument needs its `.exe` suffix (`parity.py bin/compliance.exe`); the example above is the Controller form. Re-verified twice: once at the end of the original session, and again after the rule fix in §7.8 — same verdict, `PARITY OK`, byte-for-byte.
 
 ### 6.3 Live router test — `--native`
 
@@ -264,29 +281,27 @@ vars:
 | `^hostname\s+r1$` | present | — | ✅ match |
 | `^router ospf$` | present | — | ✅ match |
 | `^\s*network 1\.1\.1\.1/32 area 0$` | present | line 17 | ✅ match |
-| `^\s*network 192\.168\.23\.0/24 area 0$` | **absent** | line 16, commented as required for adjacency | ❌ **drift** |
-| `^\s*passive-interface lo$` | **absent** (rendered as `ip ospf passive` under `interface lo`) | line 18 | ⚠️ **rule syntax vs FRR 10.6** |
+| `^\s*network 192\.168\.23\.0/24 area 0$` | **absent** | line 16, commented as required for adjacency | ❌ **drift** — still failing, intentionally |
+| passivation rule | present, as `ip ospf passive` under `interface lo` | line 18 | ✅ fixed in §7.8 |
 
-So the two failures have **different causes**, which matters because they need different fixes:
+Two of the five rules used to fail. They had **different causes**, which mattered because they needed different fixes:
 
-- **The `/24` failure is configuration drift.** The routers no longer match the playbook that is supposed to define them. `10.0.1.0/29` and `10.0.3.0/29` appear **nowhere in any copy of the repository** — not in `playbooks/`, not in `host_vars/`, not in `ansible-project-v2`, not in `_backup-prepush-20261111`. They exist only on the live routers. Someone changed the live OSPF topology by hand, outside the pipeline.
-- **The `passive-interface` failure is a rule-vs-version mismatch.** The playbook issues `passive-interface lo` (line 18), which FRR 10.6 accepts but renders as `ip ospf passive` under `interface lo`. So even a router freshly built by `master.yml` would fail this rule. This is a genuine bug in the rule, not in the router.
+- **The `/24` failure is configuration drift.** The routers no longer match the playbook that is supposed to define them. `10.0.1.0/29` and `10.0.3.0/29` appear **nowhere in any copy of the repository** — not in `playbooks/`, not in `host_vars/`, not in `ansible-project-v2`, not in `_backup-prepush-20261111`. They exist only on the live routers. Someone changed the live OSPF topology by hand, outside the pipeline. **Left unfixed on purpose** — see §7.5.
+- **The passivation failure was a rule-vs-version mismatch.** The playbook issues `passive-interface lo` (line 18), which FRR 10.6 accepts but renders as `ip ospf passive` under `interface lo`. So even a router freshly built by `master.yml` would have failed that rule. This was a genuine bug in the rule, not in the router, and it has been fixed — see §7.8.
 
 ### 7.4 Recommended action
 
 1. **Reconcile the topology first** — decide which design is intended:
    - If the `/24` should be advertised (what `02_ospf.yml` says), re-run `02_ospf.yml` and the routers return to compliance on that rule. Verify with `show ip ospf interface brief` that adjacency still forms.
-   - If the `/29` point-to-point design is the new intent, then `02_ospf.yml`, the ACL in `05_acl.yml`, and the NTP/SNMP references all need updating together — and `desired_state.yml` should be changed to match. **The playbook currently contradicts the running network**, which means the next `master.yml` run would silently undo the manual change.
+   - If the `/29` point-to-point design is the new intent, then `02_ospf.yml`, the ACL in `05_acl.yml`, and the NTP/SNMP references all need updating together — and `desired_state.yml` should be changed to match. **The playbook currently contradicts the running network.**
 
-2. **Fix the `passive-interface` rule regardless of the above.** It cannot pass against FRR 10.6 in its current form. Either:
-   - match the rendered form: `^\s*ip ospf passive$`, accepting that a plain regex cannot express "inside the `interface lo` block"; or
-   - make `02_ospf.yml` emit the per-interface form so config and rule agree.
+2. **~~Fix the `passive-interface` rule regardless of the above.~~ Done — see §7.7.** The rule was widened to accept both renderings.
 
-Neither change was made here. Modifying the lab's routing design, or the rules that grade it, is a decision for the owner — silently making the audit say `COMPLIANT` would hide a real inconsistency between repository and network.
+### 7.5 Why the `/24` finding is pinned by a test
 
-### 7.5 Why this was not "fixed" in the port
+The `/24` behaviour is **pinned by a test** — `TestShippedRulesAgainstRealFRRConfig` embeds the real r1 capture and asserts that the drift finding still occurs. If someone later widens the `/24` regex so the audit reports `COMPLIANT`, that test fails. That is deliberate: the port's job is to be faithful, and this divergence is real information about the lab, not noise to be smoothed away.
 
-The current behaviour is **pinned by a test** — `TestShippedRulesAgainstRealFRRConfig` embeds the real r1 capture and asserts that these two findings occur. If someone later "fixes" the Go regexes so the audit reports `COMPLIANT`, that test fails. That is deliberate: the port's job is to be faithful, and this divergence is real information about the lab, not noise to be smoothed away.
+The `passive-interface` assertion is pinned in **both** directions instead, because that one was a genuine rule bug rather than lab drift (§7.7).
 
 ### 7.6 Provenance
 
@@ -300,6 +315,44 @@ No lab work was performed on 2026-11-13 or 2026-11-14 — there are no session t
 So the drift cannot be attributed to a change made in the last two or three days. It predates this session, and the audit is the first thing that has surfaced it.
 
 The 2026-11-15 session did no work on this module, but it is not irrelevant — it is where the database-path trap in §8 was first diagnosed. "No compliance work" and "no useful context" are different claims, and only the first one is true here.
+
+### 7.7 Correction — the warning about "silently overwriting" was wrong
+
+An earlier revision of this report said that re-running `master.yml` "would silently undo the manual change". **That is false, and the truth is worse.** Checking every `vtysh` command the pipeline issues:
+
+| Playbook | FRR config commands | Effect on the `/29` statements |
+|---|---|---|
+| `01_fix_frr.yml` | `interface lo`, `ip address <lo>/32` | none |
+| `02_ospf.yml` | `network <lan>/24`, `network <lo>/32`, `passive-interface lo` | **none — these are pure additions** |
+| `04_snmp.yml` | `agentx` | none |
+| `05_acl.yml` | `no access-list 10`, then re-creates ACL 10 | none (replaces the ACL only) |
+| `06_backup.yml`, `07_check.yml` | `show ...` only | none |
+
+There is no `no router ospf`, no `no network`, and no playbook that writes `frr.conf` wholesale. So `master.yml` **cannot remove** the hand-made `10.0.1.0/29` and `10.0.3.0/29` — it can only add the `/24` alongside them.
+
+The real risk is the opposite of the one originally written:
+
+> Re-running `02_ospf.yml` re-adds `network 192.168.23.0/24 area 0`, so the audit would start reporting **COMPLIANT** — while the `/29` statements stay in the config, unaudited. The drift does not get undone; it becomes **invisible**. A green dashboard would then coexist with a topology nobody in the repository designed.
+
+That is a false-green, which is more dangerous than a red finding, because nothing prompts anyone to look again. The fix is the same as before (decide the design, then make config and rules agree), but the reason to decide *before* re-running is that re-running actively destroys the evidence.
+
+The one genuinely destructive playbook is `14_restore.yml`, which overwrites the running configuration from a backup. It is **not** part of `master.yml` and it refuses to run without `-e confirm_restore=yes`, so it is not a silent path.
+
+### 7.8 The `passive-interface` fix that was applied
+
+The old rule was `^\s*passive-interface lo$`. FRR 10.6 accepts the `passive-interface lo` command (so `02_ospf.yml` is correct) but renders the state as `ip ospf passive` inside the `interface lo` block. No configuration could satisfy the old rule, so the rule — not the router — was broken.
+
+The shipped rule is now:
+
+```
+^(?:[ \t]*passive-interface lo|interface lo\r?$\n(?:[ \t]+[^\n]*\r?\n)*?[ \t]+ip ospf passive)$
+```
+
+It accepts both renderings and is deliberately **scoped to the loopback block**: the `exit` that closes an interface block is unindented, so it cannot satisfy `[ \t]+[^\n]*`, and the lazy repeat stops there. This means `ip ospf passive` under any *other* interface does not satisfy the rule.
+
+Both directions are pinned by `TestPassivationRuleIsScopedToLoopback` (6 cases, including CRLF input and a config where only `eth0` is passivated). The differential harness still reports byte-for-byte parity with the Python runner on the new rule.
+
+`02_ospf.yml` was **not** changed. The command it issues is valid; only the rule that graded the *rendering* was wrong.
 
 
 ---
@@ -376,6 +429,16 @@ Given §8.2, that untested hop is precisely the one most likely to fail. It is a
 | `--native` against r2 and r3 | Verified against r1 only. The collector is host-agnostic; this is coverage, not a known defect. |
 | Ansible collection path on the Controller | The controller's `alpinelinux` password no longer authenticates (VM likely rebuilt), so `install_alpine.sh` could not be run end-to-end. Both shell scripts pass `sh -n` syntax checks. |
 | `make -C compliance/go …` targets | No `make` on this Windows machine; the same `go build` / `go test` commands were run directly (see §6.5). |
+| **Re-running the audit against the live lab on 2026-11-18** | The routers still answer on their management IPs (`192.168.23.11` responds to ping, port 22 is open), but SSH now rejects **both** the stored passwords and key auth: `no supported methods remain` with a password, `Permission denied (publickey,keyboard-interactive)` with the key. The re-verification therefore ran against the captured r1 snapshot embedded in the tests, not against the device. The snapshot is the same bytes the native collector returned when auth still worked, so the rule verdicts are unaffected — but the live config was **not** re-read, and could have changed since. |
+
+### 9.1 What that means for the drift finding
+
+The `/24` drift is reported from the 2026-11-16 capture. It has not been re-confirmed on the device today, because of the auth wall above. Two consequences worth stating plainly:
+
+- If someone has since fixed the OSPF config by hand, the finding is stale and will clear on the next successful audit.
+- If it has drifted further, the audit cannot tell you — nothing has looked at the device since.
+
+Either way the finding should be treated as **last known state, 2026-11-16**, not as current truth. Restoring SSH access is a prerequisite for trusting any live verdict.
 
 ---
 

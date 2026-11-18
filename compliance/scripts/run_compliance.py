@@ -139,27 +139,36 @@ def save_results(db_path: Path, results: list[dict[str, Any]], checked_at: str) 
         overall = "COMPLIANT"
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path, timeout=15) as con:
-        con.execute("PRAGMA foreign_keys = ON")
-        con.executescript(SCHEMA)
-        cur = con.execute(
-            """INSERT INTO compliance_runs
-            (checked_at,status,devices_total,devices_compliant,devices_noncompliant,devices_error)
-            VALUES (?,?,?,?,?,?)""",
-            (checked_at, overall, len(results), compliant, noncompliant, errors),
-        )
-        run_id = int(cur.lastrowid)
-        for device in results:
-            findings = device["findings"] or [{
-                "rule": "All required rules",
-                "detail": "Tất cả cấu hình bắt buộc đều được tìm thấy.",
-            }]
-            for finding in findings:
-                con.execute(
-                    """INSERT INTO compliance_findings
-                    (run_id,hostname,status,rule,detail) VALUES (?,?,?,?,?)""",
-                    (run_id, device["hostname"], device["status"], finding["rule"], finding["detail"]),
-                )
+    # `with sqlite3.connect(...)` commits the transaction but does NOT close the
+    # connection: sqlite3's context manager only wraps commit/rollback. The
+    # handle therefore stays open until it is garbage collected, which on
+    # Windows keeps an exclusive lock on the .db file and makes callers that
+    # clean up a temp directory fail with WinError 32. Close it explicitly.
+    con = sqlite3.connect(db_path, timeout=15)
+    try:
+        with con:
+            con.execute("PRAGMA foreign_keys = ON")
+            con.executescript(SCHEMA)
+            cur = con.execute(
+                """INSERT INTO compliance_runs
+                (checked_at,status,devices_total,devices_compliant,devices_noncompliant,devices_error)
+                VALUES (?,?,?,?,?,?)""",
+                (checked_at, overall, len(results), compliant, noncompliant, errors),
+            )
+            run_id = int(cur.lastrowid)
+            for device in results:
+                findings = device["findings"] or [{
+                    "rule": "All required rules",
+                    "detail": "Tất cả cấu hình bắt buộc đều được tìm thấy.",
+                }]
+                for finding in findings:
+                    con.execute(
+                        """INSERT INTO compliance_findings
+                        (run_id,hostname,status,rule,detail) VALUES (?,?,?,?,?)""",
+                        (run_id, device["hostname"], device["status"], finding["rule"], finding["detail"]),
+                    )
+    finally:
+        con.close()
     return run_id
 
 

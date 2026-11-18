@@ -30,15 +30,23 @@ GO_BIN = sys.argv[1] if len(sys.argv) > 1 else None
 
 # Fixtures chosen to hit all three branches with the REAL rule set, so a
 # divergence in any shipped regex would surface here.
+#
+# r1 is compliant and uses the FRR 10.6 rendering of loopback passivation
+# ("ip ospf passive" inside the interface block), which is what a real router
+# emits. Keeping the legacy "passive-interface lo" here would let a regression
+# in the per-interface branch pass unnoticed.
 FIXTURES = {
     "r1": (
         "hostname r1\n"
         "router ospf\n"
         " network 1.1.1.1/32 area 0\n"
         " network 192.168.23.0/24 area 0\n"
-        " passive-interface lo\n"
+        "interface lo\n"
+        " ip address 1.1.1.1/32\n"
+        " ip ospf passive\n"
+        "exit\n"
     ),
-    # r2 is missing passive-interface lo and the /24 network, so it should
+    # r2 is missing loopback passivation and the /24 network, so it should
     # report exactly those rules as missing.
     "r2": (
         "hostname r2\n"

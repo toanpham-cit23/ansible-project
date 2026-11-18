@@ -111,14 +111,21 @@ Nếu API container đang dùng một file DB khác, cần bảo đảm biến `
 
 Mở `compliance/config/desired_state.yml`. Mỗi router có `required_patterns` là danh sách regex được tìm trong output FRR `show running-config`. Có thể thêm/xóa rule theo cấu hình chuẩn của lab.
 
-Các rule mẫu khớp với playbook OSPF hiện có: hostname, OSPF process, network LAN, loopback /32 và `passive-interface lo`.
+Các rule mẫu khớp với playbook OSPF hiện có: hostname, OSPF process, network LAN, loopback /32 và rule loopback-passive (xem dưới).
 
-> **Lưu ý — hai rule mẫu không khớp FRR 10.6.** Khi đối chiếu với `show running-config` thực tế trên lab:
+> **Lưu ý — còn một rule không khớp thực tế lab.**
 >
-> - `^\s*network 192\.168\.23\.0/24 area 0$` — prefix này đã được chuyển khỏi OSPF sang các link transit, nên router đúng chuẩn vẫn báo thiếu.
-> - `^\s*passive-interface lo$` — FRR 10.6 in dạng `ip ospf passive` bên trong `interface lo`, không phải `passive-interface lo` trong `router ospf`.
+> - `^\s*network 192\.168\.23\.0/24 area 0$` — prefix này đã được chuyển khỏi OSPF sang các link transit (`10.0.1.0/29`, `10.0.3.0/29`), nên router đúng chuẩn vẫn báo thiếu. Đây là **drift thật** giữa repo và thiết bị, cố ý giữ nguyên để không che mất khác biệt. Cần quyết định: khôi phục `/24` vào OSPF, hoặc chấp nhận thiết kế `/29` rồi sửa `02_ospf.yml`, `05_acl.yml` và file rule này cho đồng bộ.
 >
-> Hệ quả: một router được cấu hình đúng vẫn bị chấm `NON_COMPLIANT`. Cần chọn một trong hai hướng: khôi phục `192.168.23.0/24` vào OSPF, hoặc sửa regex cho đúng định dạng FRR đang dùng. Xem snapshot thực tế trong `compliance/reports/actual/` trước khi sửa.
+> **Đã sửa — rule loopback-passive.** Trước đây rule là `^\s*passive-interface lo$`. FRR 10.6 vẫn nhận lệnh `passive-interface lo` (nên `02_ospf.yml` đúng), nhưng in trạng thái ra thành `ip ospf passive` bên trong block `interface lo`. Không cấu hình nào thỏa được rule cũ, nên lỗi nằm ở rule chứ không ở router. Rule hiện tại chấp nhận cả hai dạng:
+>
+> ```
+> ^(?:[ \t]*passive-interface lo|interface lo\r?$\n(?:[ \t]+[^\n]*\r?\n)*?[ \t]+ip ospf passive)$
+> ```
+>
+> Nhánh thứ hai bị giới hạn trong block `interface lo`: dòng `exit` không thụt lề nên không khớp `[ \t]+[...]`, vì vậy `ip ospf passive` dưới một interface khác **không** làm rule pass. Cả hai chiều được khóa bằng `TestPassivationRuleIsScopedToLoopback`. Xem `compliance/PORT-REPORT.md` §7.7–§7.8.
+
+Regex được biên dịch với ngữ nghĩa Python `re.MULTILINE`: `^`/`$` khớp theo từng dòng. Bản Go mở rộng `\s`, `\S`, `\d`, `\D`, `\w`, `\W` thành character class tương đương Python (Unicode-aware), và chuẩn hóa `\r\n` về `\n` trước khi so khớp — nếu không, snapshot CRLF sẽ làm mọi rule neo `$` fail.
 
 Regex được biên dịch với ngữ nghĩa Python `re.MULTILINE`: `^`/`$` khớp theo từng dòng. Bản Go mở rộng `\s`, `\S`, `\d`, `\D`, `\w`, `\W` thành character class tương đương Python (Unicode-aware), và chuẩn hóa `\r\n` về `\n` trước khi so khớp — nếu không, snapshot CRLF sẽ làm mọi rule neo `$` fail.
 

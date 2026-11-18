@@ -1,4 +1,19 @@
 # Regex được tìm trên output `vtysh -c "show running-config"`.
+#
+# Quy ước: mỗi rule được so khớp bằng `re.search(..., re.MULTILINE)`, nên `^`/`$`
+# neo theo từng dòng. `\r?` có mặt để rule vẫn đúng nếu một ngày nào đó cấu hình
+# chưa được chuẩn hóa CRLF -> LF; khi đã chuẩn hóa thì `\r?` khớp rỗng, vô hại.
+#
+# Lưu ý về rule loopback (áp dụng cho cả r1, r2, r3):
+#   FRR 10.6 không in ra `passive-interface lo` trong `router ospf` nữa. Nó ghi
+#   trạng thái passive thành `ip ospf passive` bên trong block `interface lo`.
+#   Rule cũ chỉ chấp nhận dạng cũ, nên một router cấu hình ĐÚNG vẫn bị chấm
+#   NON_COMPLIANT. Rule dưới đây chấp nhận cả hai dạng đang tồn tại trong lab:
+#     - `passive-interface lo`  (cú pháp cũ, vẫn còn trong vài backup)
+#     - `interface lo` + `  ip ospf passive`  (FRR 10.6 hiện hành)
+#   Nhánh thứ hai được giới hạn trong block `interface lo`: dòng `exit` không có
+#   thụt lề nên không khớp `[ \t]+[...]`, vì vậy `ip ospf passive` nằm dưới một
+#   interface khác sẽ KHÔNG làm rule này pass.
 routers:
   r1:
     required_patterns:
@@ -6,18 +21,18 @@ routers:
       - '^router ospf$'
       - '^\s*network 192\.168\.23\.0/24 area 0$'
       - '^\s*network 1\.1\.1\.1/32 area 0$'
-      - '^\s*passive-interface lo$'
+      - '^(?:[ \t]*passive-interface lo|interface lo\r?$\n(?:[ \t]+[^\n]*\r?\n)*?[ \t]+ip ospf passive)$'
   r2:
     required_patterns:
       - '^hostname\s+r2$'
       - '^router ospf$'
       - '^\s*network 192\.168\.23\.0/24 area 0$'
       - '^\s*network 2\.2\.2\.2/32 area 0$'
-      - '^\s*passive-interface lo$'
+      - '^(?:[ \t]*passive-interface lo|interface lo\r?$\n(?:[ \t]+[^\n]*\r?\n)*?[ \t]+ip ospf passive)$'
   r3:
     required_patterns:
       - '^hostname\s+r3$'
       - '^router ospf$'
       - '^\s*network 192\.168\.23\.0/24 area 0$'
       - '^\s*network 3\.3\.3\.3/32 area 0$'
-      - '^\s*passive-interface lo$'
+      - '^(?:[ \t]*passive-interface lo|interface lo\r?$\n(?:[ \t]+[^\n]*\r?\n)*?[ \t]+ip ospf passive)$'
