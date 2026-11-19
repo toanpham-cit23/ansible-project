@@ -308,6 +308,12 @@ type Device struct {
 	Site           string  `json:"site"`
 	LastSeen       *string `json:"last_seen"`
 	LastState      *string `json:"last_state"`
+	// LastReachable answers a different question than LastState. LastState is
+	// the SNMP verdict; LastReachable is whether the host answered at all.
+	// A router whose snmpd stopped is reachable and unmonitored, which is not
+	// the same thing as being down.
+	LastReachable  *string `json:"last_reachable"`
+	ReachMethod    *string `json:"reach_method"`
 	SSHPort        int     `json:"ssh_port"`
 	TelnetPort     int     `json:"telnet_port"`
 }
@@ -316,6 +322,7 @@ const deviceSQL = `SELECT d.id, d.hostname, d.mgmt_ip,
        COALESCE(d.kind_override, d.kind) AS effective_kind,
        d.kind_confidence, d.vendor, d.model, d.asset_tag,
        COALESCE(s.name,'') AS site, d.last_seen, d.last_state,
+       d.last_reachable, d.reach_method,
        d.ssh_port, d.telnet_port
 FROM devices d LEFT JOIN sites s ON s.id = d.site_id`
 
@@ -326,6 +333,7 @@ func scanDevices(rows *sql.Rows) ([]Device, error) {
 		var d Device
 		if err := rows.Scan(&d.ID, &d.Hostname, &d.MgmtIP, &d.EffectiveKind, &d.KindConfidence,
 			&d.Vendor, &d.Model, &d.AssetTag, &d.Site, &d.LastSeen, &d.LastState,
+			&d.LastReachable, &d.ReachMethod,
 			&d.SSHPort, &d.TelnetPort); err != nil {
 			return nil, err
 		}
@@ -648,7 +656,7 @@ func handleTopology(w http.ResponseWriter, r *http.Request, u *User) {
 	// protected travels with the node: the UI must not offer a Delete button on
 	// infrastructure, and the API must refuse the call even if it is forged.
 	nr, err := db.Query(`SELECT v.id, v.hostname, v.mgmt_ip, v.effective_kind, v.last_state,
-	                            COALESCE(d.protected,0)
+	                            COALESCE(d.protected,0), d.last_reachable, d.reach_method
 	                     FROM v_inventory v LEFT JOIN devices d ON d.id = v.id`)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
@@ -657,11 +665,12 @@ func handleTopology(w http.ResponseWriter, r *http.Request, u *User) {
 	for nr.Next() {
 		var id int64
 		var host, ip, kind string
-		var state sql.NullString
+		var state, reachable, method sql.NullString
 		var prot int
-		if nr.Scan(&id, &host, &ip, &kind, &state, &prot) == nil {
+		if nr.Scan(&id, &host, &ip, &kind, &state, &prot, &reachable, &method) == nil {
 			nodes = append(nodes, map[string]any{"id": id, "hostname": host, "mgmt_ip": ip,
-				"effective_kind": kind, "last_state": state.String, "protected": prot == 1})
+				"effective_kind": kind, "last_state": state.String, "protected": prot == 1,
+				"last_reachable": reachable.String, "reach_method": method.String})
 		}
 	}
 	nr.Close()

@@ -878,7 +878,44 @@ function edgeOf(cx, cy, w, h, tx, ty) {
   return [cx + dx * s, cy + dy * s];
 }
 
+// Four states, because there are four situations and the UI used to collapse
+// them into two.
+//   up      - SNMP answered; we have health data.
+//   blind   - SNMP silent, but the host answers ICMP. It is forwarding traffic
+//             and every path through it still works; we simply have no metrics.
+//             This is a monitoring fault, not a network fault.
+//   down    - something answered and said it was gone: ICMP failed, or SNMP
+//             reported the device down. This is the only state that earns red.
+//   unknown - nothing has been measured yet. Absence of data is not evidence
+//             of an outage, so this draws no fault either.
+// Reporting `blind` as `down` is what drew a healthy core as a red outage and
+// then invented "2 uplinks down" on all three switches.
+function devLiveness(n) {
+  if (!n) return 'down';
+  if (n.last_state === 'up') return 'up';
+  if (n.last_reachable === 'up') return 'blind';
+  if (n.last_reachable === 'down' || n.last_state === 'down') return 'down';
+  return 'unknown';
+}
+
+function devStatePill(n) {
+  const s = devLiveness(n);
+  if (s === 'up') return '<span class="pill up">up</span>';
+  if (s === 'blind') {
+    return '<span class="pill warn" title="Answers ICMP but not SNMP: reachable, '
+      + 'but no health data is being collected">unmonitored</span>';
+  }
+  if (s === 'unknown') {
+    return '<span class="pill" title="Not measured yet">unknown</span>';
+  }
+  return '<span class="pill down">' + esc(n.last_state || 'down') + '</span>';
+}
+
 function labTopology(t, leases) {
+  const liveness = devLiveness;
+  // A device that is forwarding keeps its links. Only a real outage cuts them.
+  const carries = (n) => liveness(n) !== 'down';
+
   // Pick the controller by name first. A second server added for testing would
   // otherwise be found first (lower id) and hijack the whole diagram's centre.
   const ctrl = t.nodes.find((n) => n.hostname === 'controller')
@@ -919,8 +956,9 @@ function labTopology(t, leases) {
   // Three states, not two: 'up', 'down' (SNMP answered that it is down), and
   // unknown (no successful poll yet). Collapsing the last two into one made a
   // newly added device appear as a fault before it had ever been measured.
-  const isDown = (r) => r.last_state === 'down';
-  const isUnknown = (r) => !r.last_state || r.last_state === 'unknown';
+  // Reachability is now a fourth axis: `carries` asks whether the host is
+  // still forwarding, which ICMP can answer when SNMP cannot.
+  const isDown = (r) => liveness(r) === 'down';
 
   // Everything wrong with everything, keyed so a click can find it again.
   // Nothing here is invented: each entry is a row in the database that says so.
@@ -1037,9 +1075,9 @@ function labTopology(t, leases) {
   const via = LAB.switches.map((_, si) => {
     const carriers = (kind) => routers.map((r, i) => i).filter((i) => upOf(i)[kind].includes(si));
     const prim = carriers('primary');
-    const upPrim = prim.filter((i) => routers[i].last_state === 'up');
+    const upPrim = prim.filter((i) => carries(routers[i]));
     if (upPrim.length) return upPrim[0];
-    const upSpare = carriers('backup').filter((i) => routers[i].last_state === 'up');
+    const upSpare = carriers('backup').filter((i) => carries(routers[i]));
     return upSpare.length ? upSpare[0] : prim[0];
   });
 
@@ -1050,7 +1088,9 @@ function labTopology(t, leases) {
     // A row with no state at all has never been polled successfully. Drawing
     // it as "down" invented a failure the database never reported; an X on a
     // device that has simply not answered its first poll is a false alarm.
-    const dead = r.last_state === 'down';
+    // `carries` keeps that guard and adds the reachability axis: a router that
+    // answers ICMP is still forwarding even when SNMP says nothing.
+    const dead = !carries(r);
     // A device we cannot identify has no known cabling. Drawing guessed links
     // to the switches would be an assertion the data does not support, so the
     // only path kept is the one that is measured: the controller's poll.
@@ -1077,9 +1117,16 @@ function labTopology(t, leases) {
         .filter((si) => via[si] === i).flatMap((si) => macsOn(si)).join(' ');
       const [ax, ay] = edgeOf(ctrlPt[0], ctrlPt[1], CW, CH, p[0], p[1]);
       const [bx, by] = edgeOf(p[0], p[1], RW, RH, ctrlPt[0], ctrlPt[1]);
-      if (isDown(r)) {
-        // blinking, not crossed: the poll is still being attempted, it is just
-        // not answered. A cross means "cut on purpose".
+      const live = liveness(r);
+      if (live === 'down') {
+        // Nothing answers, so the poll path is genuinely cut.
+        line(ax, ay, bx, by, 'tp-blocked', path);
+        cross((ax + bx) / 2, (ay + by) / 2);
+      } else if (live === 'blind') {
+        // Blinking, not crossed: the poll is still attempted, it is just not
+        // answered. The device forwards, we simply have no metrics from it.
+        line(ax, ay, bx, by, 'tp-ctrl-blink', path);
+      } else if (live === 'unknown') {
         line(ax, ay, bx, by, 'tp-ctrl-blink', path);
       } else {
         line(ax, ay, bx, by, 'tp-ctrl', path);
@@ -1092,7 +1139,9 @@ function labTopology(t, leases) {
     const ib = routers.findIndex((r) => r.id === l.b_device_id);
     if (ia < 0 || ib < 0) continue;
     const a = rPt[ia], b = rPt[ib];
-    const bad = isDown(routers[ia]) || isDown(routers[ib]);
+    // An adjacency only drops when a device stops forwarding. A blind router
+    // still floods LSAs, so its peer links stay solid.
+    const bad = !carries(routers[ia]) || !carries(routers[ib]);
     const cls = bad ? 'tp-blocked' : 'tp-peer';
     if (Math.abs(ia - ib) === 1) {
       const [ax, ay] = edgeOf(a[0], a[1], RW, RH, b[0], b[1]);
@@ -1144,16 +1193,18 @@ function labTopology(t, leases) {
     const path = LAB.switches.map((_, si) => si)
       .filter((si) => via[si] === i).flatMap((si) => macsOn(si)).join(' ');
     const key = 'dev:' + r.id;
-    const down = isDown(r);
-    if (isUnknown(r) && !down) {
+    const live = liveness(r);
+    const down = live === 'down';
+    if (live === 'unknown') {
       note(key, r.hostname, 'warn', 'No successful health poll yet. The device is drawn '
         + 'without a fault flag until the poller has a result; check the inventory if it stays this way.');
     }
     if (down) {
       const carried = plan.primary.map((si) => LAB.switches[si]);
       const spared = plan.backup.map((si) => LAB.switches[si]);
-      note(key, r.hostname, 'err', 'Not answering SNMP. The dashboard has no health data for it, '
-        + 'and every uplink it carries is drawn blocked.');
+      note(key, r.hostname, 'err', 'Nothing answers - neither SNMP nor ICMP. '
+        + 'The device is down, so the dashboard has no health data for it and every '
+        + 'uplink it carries is drawn blocked.');
       if (carried.length) {
         note(key, r.hostname, 'warn', carried.join(', ') + ' loses its primary uplink and fails over '
           + 'to the spare. Check that the spare is up before the traffic moves.');
@@ -1163,9 +1214,23 @@ function labTopology(t, leases) {
           + ' is gone, so ' + (spared.length === 1 ? 'that switch has' : 'those switches have')
           + ' one fewer backup.');
       }
+    } else if (live === 'blind') {
+      // The honest report. The device answers, so nothing is cut; we are
+      // simply not collecting metrics from it. Filing this as an outage was the
+      // false red: the uplinks were drawn blocked for a router still routing.
+      note(key, r.hostname, 'warn', 'Answers ICMP but not SNMP, so it is reachable '
+        + 'but unmonitored. Traffic still flows through it and its uplinks are intact; '
+        + 'there are no CPU, memory or interface counters to show. Check that snmpd is '
+        + 'running and the community string matches.');
     }
-    marks.push(card(x, y, RW, RH, down ? 'down' : 'rt', r.hostname, r.mgmt_ip,
-      r.hostname + ' \u00b7 ' + (r.last_state || 'unknown') + ' \u00b7 ' + r.mgmt_ip
+    marks.push(card(x, y, RW, RH, down ? 'down' : (live === 'blind' ? 'rt blind' : 'rt'),
+      r.hostname, r.mgmt_ip,
+      r.hostname + ' \u00b7 '
+      + (live === 'up' ? 'up, monitored'
+        : live === 'blind' ? 'reachable via ICMP, SNMP silent - unmonitored'
+        : live === 'unknown' ? 'not measured yet'
+        : 'unreachable')
+      + ' \u00b7 ' + r.mgmt_ip
       + (spare ? ' \u00b7 spare uplink to ' + spare : ''),
       path ? ` data-path="${esc(path)}"` : ''));
     if (issues[key]) rings.push(halo(x, y, RW, RH, issues[key].sev));
@@ -1178,7 +1243,11 @@ function labTopology(t, leases) {
     // still carrying traffic.
     const plan = routers.map((r, ri) => ({ r, ri }))
       .filter((q) => upOf(q.ri).primary.includes(i) || upOf(q.ri).backup.includes(i));
-    const lost = plan.filter((q) => isDown(q.r));
+    // An uplink is lost only when its router stops forwarding. A router that
+    // still pings keeps carrying this switch, so counting it as lost invented
+    // "2 uplinks down" on a switch whose paths were all working.
+    const lost = plan.filter((q) => !carries(q.r));
+    const blind = plan.filter((q) => liveness(q.r) === 'blind');
     const live = plan.length - lost.length;
     const key = 'sw:' + i;
     if (lost.length) {
@@ -1189,12 +1258,19 @@ function labTopology(t, leases) {
           ? 'No path left to the core - everything behind this switch is cut off.'
           : live === 1 ? 'Traffic moves to the remaining uplink.'
           : 'Traffic moves to the ' + live + ' remaining uplinks.'));
+    } else if (blind.length) {
+      // Same paths, less visibility. Worth saying, not worth a red flag.
+      note(key, name, 'warn', 'All ' + plan.length + ' uplinks are up and carrying traffic, '
+        + 'but ' + blind.map((q) => q.r.hostname).join(', ') + ' '
+        + (blind.length === 1 ? 'does' : 'do') + ' not answer SNMP, so this switch has '
+        + 'no per-uplink counters. The paths themselves are fine.');
     }
     const vlans = LAB.hosts.filter((h) => h.sw === i).map((h) => 'VLAN ' + h.vlan);
     marks.push(card(x, y, SW, SH, live === 0 ? 'sw down' : 'sw', name,
       lost.length ? lost.length + ' uplink' + (lost.length === 1 ? '' : 's') + ' down' : '802.1Q trunk',
       name + ' \u00b7 trunk \u00b7 ' + (vlans.join(', ') || 'no access port')
-      + (lost.length ? ' \u00b7 ' + lost.length + ' uplink(s) down' : ''),
+      + (lost.length ? ' \u00b7 ' + lost.length + ' uplink(s) down' : '')
+      + (blind.length && !lost.length ? ' \u00b7 uplinks up, ' + blind.length + ' unmonitored' : ''),
       ` data-path="${esc(macsOn(i).join(' '))}"`));
     if (issues[key]) {
       rings.push(halo(x, y, SW, SH, issues[key].sev));
@@ -1280,6 +1356,7 @@ function labTopology(t, leases) {
     terminated, idle: LAB.hosts.length - online - terminated,
     unplaced: unplaced.length,
     routersDown: routers.filter(isDown).length,
+    routersBlind: routers.filter((r) => liveness(r) === 'blind').length,
     flagged: Object.keys(issues).length,
   };
 }
@@ -1395,8 +1472,11 @@ const views = {
     const cpu = avg(scoped.map((d) => last(d, 'cpu_pct')));
     const mem = avg(scoped.map((d) => last(d, 'mem_pct')));
     const dsk = avg(scoped.map((d) => last(d, 'disk_pct')));
-    const up = devs.filter((d) => d.last_state === 'up').length;
-    const down = devs.length - up;
+    // Three counts, because "down" was hiding a monitoring gap. A device that
+    // pings but has a stopped snmpd was being reported as an outage.
+    const up = devs.filter((d) => devLiveness(d) === 'up').length;
+    const blind = devs.filter((d) => devLiveness(d) === 'blind').length;
+    const down = devs.filter((d) => devLiveness(d) === 'down').length;
 
     const tsSet = new Set();
     scoped.forEach((d) => d._h.forEach((r) => tsSet.add(String(r.ts).slice(0, 16))));
@@ -1463,19 +1543,26 @@ const views = {
       // It gets a pulsing yellow question mark instead of a red failure badge,
       // and no terminal button, because a shell to a device we cannot identify
       // is a guess, not an operation.
-      const unknown = d.last_state !== 'up';
+      // A blind device is different again: it answers, so a console is a
+      // perfectly reasonable operation and disabling it would be a lie about
+      // reachability.
+      const lv = devLiveness(d);
+      const unknown = lv === 'down' || lv === 'unknown';
       const foot = isLocal
         ? '<span class="muted" style="font-size:11.5px">Managed locally - no remote console</span>'
-        : (unknown
+        : (lv === 'down'
             ? '<span class="muted" style="font-size:11.5px">Unidentified - console disabled</span>'
             : `<button class="act" data-act="term" data-id="${d.id}">Terminal console</button>`);
-      return `<div class="dev-card${unknown ? ' down unknown' : ''}" data-id="${d.id}">
+      const cardCls = lv === 'down' ? ' down unknown' : (lv === 'blind' ? ' blind' : '');
+      return `<div class="dev-card${cardCls}" data-id="${d.id}">
         <div class="dev-head"><b>${esc(d.hostname)}</b>
           <span class="row" style="gap:6px">
             ${badge}
-            ${unknown
-              ? '<span class="pill q" title="No response - device not identified">?</span>'
-              : '<span class="pill up">up</span>'}
+            ${lv === 'up'
+              ? '<span class="pill up">up</span>'
+              : lv === 'blind'
+                ? '<span class="pill warn" title="Answers ICMP but not SNMP">unmonitored</span>'
+                : '<span class="pill q" title="No response - device not identified">?</span>'}
           </span></div>
         <canvas class="mini" data-dev="${d.id}"></canvas>
         <div class="dev-nums">
@@ -1494,6 +1581,7 @@ const views = {
       <div class="stat-grid">
         <div class="panel"><div class="p-title">Number of devices</div><div class="p-big">${devs.length}</div></div>
         <div class="panel ${down ? 'err' : 'ok'}"><div class="p-title">Unavailable</div><div class="p-big">${down}</div></div>
+        ${blind ? `<div class="panel warn"><div class="p-title" title="Answers ICMP but not SNMP: the device is up, we just have no health data">Reachable, unmonitored</div><div class="p-big">${blind}</div></div>` : ''}
       </div>
       <div class="dev-grid">${cards}</div>`;
 
@@ -1625,6 +1713,7 @@ const views = {
       built.terminated ? `<span class="tp-stat err"><b>${built.terminated}</b> terminated</span>` : '',
       built.idle ? `<span class="tp-stat"><b>${built.idle}</b> no address</span>` : '',
       built.routersDown ? `<span class="tp-stat err"><b>${built.routersDown}</b> router${built.routersDown === 1 ? '' : 's'} down</span>` : '',
+      built.routersBlind ? `<span class="tp-stat warn"><b>${built.routersBlind}</b> reachable but unmonitored</span>` : '',
       errs ? `<span class="tp-stat err"><b>${errs}</b> fault${errs === 1 ? '' : 's'}</span>` : '',
       warns ? `<span class="tp-stat warn"><b>${warns}</b> warning${warns === 1 ? '' : 's'}</span>` : '',
     ].filter(Boolean).join('');
@@ -1643,6 +1732,7 @@ const views = {
         <span><i style="background:var(--accent)"></i>live uplink</span>
         <span><i class="dash ok"></i>spare uplink (redundancy)</span>
         <span><i class="dash accent"></i>controller poll</span>
+        <span><i class="dash" style="background:var(--warn)"></i>poll unanswered (host still up)</span>
         <span><i class="dash"></i>OSPF adjacency</span>
         <span><i style="background:var(--ok)"></i>PC holding a lease</span>
         <span><i class="dash err"></i>cut / blocked path</span>
@@ -1695,17 +1785,26 @@ const views = {
       <thead><tr><th>Host</th><th>Address</th><th>Class</th><th>State</th><th></th><th></th><th></th></tr></thead>
       <tbody>${t.nodes.map((n) => {
         const issue = built.issues['dev:' + n.id];
-        return `<tr${issue ? ' class="cut"' : ''}>
+        const lv = devLiveness(n);
+        // Only a device that answers nothing is a candidate for deletion. A
+        // blind device is live infrastructure with a monitoring gap; offering
+        // "Delete" on it invites removing a router that is passing traffic.
+        // The row is cut only for a real fault: a warning-level issue (the
+        // monitoring gap) is not the same as a broken path.
+        const isCut = lv === 'down' || (issue && issue.sev === 'err');
+        return `<tr${isCut ? ' class="cut"' : ''}>
         <td><b>${esc(n.hostname)}</b></td><td class="mono">${esc(n.mgmt_ip)}</td><td>${esc(n.effective_kind)}</td>
-        <td><span class="pill ${n.last_state === 'up' ? 'up' : 'down'}">${esc(n.last_state || 'unknown')}</span></td>
+        <td>${devStatePill(n)}</td>
         <td>${issue ? xIcon(issue.sev, 'dev:' + n.id)
-          : ((n.last_state && n.last_state !== 'up')
-            ? '<span class="chip chip-warn" title="Not answering - no health data">!</span>'
-            : '')}</td>
+          : (lv === 'blind'
+            ? '<span class="chip chip-warn" title="Answers ICMP but not SNMP - reachable, no health data">!</span>'
+            : (lv === 'unknown'
+              ? '<span class="chip chip-warn" title="Not measured yet">?</span>'
+              : ''))}</td>
         <td>${n.effective_kind === 'server' ? '' : `<button class="act" data-act="term" data-id="${n.id}">terminal</button>`}</td>
         <td>${n.protected
           ? '<span class="muted" style="font-size:11.5px" title="infrastructure - never auto-deleted">protected</span>'
-          : (n.last_state !== 'up'
+          : (lv === 'down'
             ? `<button class="act danger" data-act="device-delete" data-id="${n.id}"
                        data-who="${esc(n.hostname)}">Delete</button>`
             : '<span class="muted" style="font-size:11.5px">in use</span>')}</td>
@@ -1847,7 +1946,7 @@ const views = {
         <div class="row" style="justify-content:space-between;margin-bottom:11px">
           <div><b style="font-size:15px">${esc(d.hostname)}</b>
             <div class="muted" style="font-size:12.5px">${esc(d.site || '—')} · ${esc(d.effective_kind)}</div></div>
-          <span class="pill ${d.last_state === 'up' ? 'up' : 'down'}">${esc(d.last_state || 'unknown')}</span>
+          ${devStatePill(d)}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
           <label class="muted" style="font-size:12px">Address<br>
@@ -2583,7 +2682,7 @@ const views = {
         <td><b>${esc(d.hostname)}</b></td>
         <td class="mono">${esc(d.mgmt_ip)}</td>
         <td>${esc(d.effective_kind)}</td>
-        <td><span class="pill ${d.last_state === 'up' ? 'up' : 'down'}">${esc(d.last_state || '?')}</span></td>
+        <td>${devStatePill(d)}</td>
         <td class="muted mono" style="font-size:11.5px">${esc(d.last_seen || '')}</td>
         <td style="text-align:right">${admin
           ? `<button class="act" data-act="dev-del" data-id="${d.id}" data-host="${esc(d.hostname)}">Remove</button>` : ''}</td>
@@ -2845,11 +2944,13 @@ const views = {
     ]);
     const nodes = t.nodes || [];
     const leases = (ld && ld.leases) || [];
-    const up = nodes.filter((n) => n.last_state === 'up').length;
+    const up = nodes.filter((n) => devLiveness(n) === 'up').length;
+    const blindN = nodes.filter((n) => devLiveness(n) === 'blind').length;
     const online = leases.filter((l) => l.online && !l.blocked).length;
     const cut = leases.filter((l) => l.blocked).length;
     const live = [
       `<span class="tp-stat ok"><b>${up}/${nodes.length}</b> devices up</span>`,
+      blindN ? `<span class="tp-stat warn"><b>${blindN}</b> unmonitored</span>` : '',
       `<span class="tp-stat ok"><b>${online}</b> hosts online</span>`,
       cut ? `<span class="tp-stat err"><b>${cut}</b> terminated</span>` : '',
     ].filter(Boolean).join('');

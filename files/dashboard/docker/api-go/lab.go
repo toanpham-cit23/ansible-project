@@ -256,6 +256,12 @@ func ensureLabSchema() {
 		"ALTER TABLE events ADD COLUMN acked INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE devices ADD COLUMN discovered_at TEXT",
 		"ALTER TABLE devices ADD COLUMN community TEXT",
+		// Liveness and SNMP health are two facts, not one. last_state stores the
+		// SNMP verdict; these two store whether the host answers at all and how
+		// we found out, so the UI can say "reachable, unmonitored" instead of
+		// drawing a healthy router as an outage.
+		"ALTER TABLE devices ADD COLUMN last_reachable TEXT",
+		"ALTER TABLE devices ADD COLUMN reach_method TEXT",
 		"ALTER TABLE links ADD COLUMN discovered INTEGER NOT NULL DEFAULT 0",
 		"ALTER TABLE links ADD COLUMN evidence TEXT",
 		// A terminated connection is a state the lease carries, not a row we

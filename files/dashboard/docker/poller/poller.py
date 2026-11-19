@@ -148,6 +148,29 @@ def conn():
     return c
 
 
+def ensure_reach_columns(c):
+    """Add the liveness columns if this database predates them.
+
+    The API server also runs this migration, but the two containers start
+    independently and the poller is the one that WRITES these columns. Without
+    this, a poller that comes up before the API fails every cycle with
+    "no such column: last_reachable" - and because cycle errors are caught and
+    logged, the dashboard would simply stay empty with no obvious cause.
+    Idempotent, so running it on every start is safe.
+    """
+    have = {r[1] for r in c.execute("PRAGMA table_info(devices)")}
+    for name in ("last_reachable", "reach_method"):
+        if name not in have:
+            try:
+                c.execute("ALTER TABLE devices ADD COLUMN %s TEXT" % name)
+                print("migrated: devices.%s" % name, flush=True)
+            except sqlite3.OperationalError as e:
+                # Another process may have added it between the read and the
+                # write. That is the outcome we wanted either way.
+                print("migration note (%s): %s" % (name, e), flush=True)
+    c.commit()
+
+
 def decrypt(blob):
     if not blob:
         return None
@@ -180,6 +203,81 @@ def get(host, args, oid, timeout=2):
         return v if p.returncode == 0 and v and v != "NONE" else None
     except Exception:
         return None
+
+
+def _ping_alive(host, timeout):
+    """ICMP probe. -> True / False / None when ICMP cannot be used at all.
+
+    None is the important return. The container runs as uid 10001 with no
+    NET_RAW capability, and busybox ping needs a raw socket, so on Alpine it
+    fails on *every* address rather than on the one that is really dead. A
+    failure we cannot attribute to the host must never be recorded as one.
+
+    The flags are POSIX/busybox: -c count, -w deadline in seconds. Anything
+    that does not understand them is treated as "no ICMP here" and the caller
+    falls back, rather than reading a usage error as a dead device.
+    """
+    argv = ["ping", "-c", "1", "-w", str(max(1, int(timeout))), host]
+    try:
+        p = subprocess.run(argv, capture_output=True, timeout=timeout + 3)
+    except FileNotFoundError:
+        return None                            # no ping binary in the image
+    except subprocess.TimeoutExpired:
+        # We were allowed to send and the host did not answer within the
+        # deadline. That is a real "no".
+        return False
+    except Exception:
+        return None
+
+    if p.returncode == 0:
+        return True
+    err = (p.stderr or b"").decode("utf-8", "replace").lower()
+    if any(s in err for s in ("permission denied", "not permitted",
+                              "operation not allowed", "must be root",
+                              "socket")):
+        return None                            # never got to send it
+    if any(s in err for s in ("unrecognized option", "invalid option",
+                              "unknown option", "illegal option", "usage:")):
+        return None                            # this ping is not POSIX
+    return False
+
+
+def _tcp_alive(host, timeout=1):
+    """Fallback liveness probe: does anything accept a TCP connection?
+
+    Used when ICMP is unavailable. It answers a weaker question - "some service
+    is listening" rather than "the IP stack replies" - but it is enough to
+    separate a dead host from a live host whose SNMP is broken, which is the
+    distinction that matters here. A router with a stopped snmpd still has sshd.
+    """
+    import socket
+    for port in (22, 23, 443, 80):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            if s.connect_ex((host, port)) == 0:
+                return True
+        except Exception:
+            pass
+        finally:
+            s.close()
+    return False
+
+
+def icmp_alive(host, timeout=1):
+    """-> (alive: bool, method: str)
+
+    Is the host answering at all? Deliberately separate from SNMP: a router
+    whose snmpd has stopped still routes packets, and asking only the SNMP
+    question is what made the dashboard store "down" for a working device.
+
+    Falls back to a TCP probe when the container cannot send ICMP, so the
+    answer stays meaningful inside the image's own security profile.
+    """
+    r = _ping_alive(host, timeout)
+    if r is not None:
+        return r, "icmp"
+    return _tcp_alive(host, timeout), "tcp"
 
 
 def walk(host, args, oid, timeout=3):
@@ -1183,7 +1281,8 @@ def cycle(c):
                 ifn = str(sum(1 for _ in open("/proc/net/dev")) - 2)
             except Exception:
                 ifn = None
-            polled.append((d, "up", local_metrics(), str(up_s * 100) if up_s else None, ifn, None))
+            polled.append((d, "up", local_metrics(), str(up_s * 100) if up_s else None, ifn, None,
+                           "up", "local"))
             continue
 
         args = auth(d)
@@ -1191,9 +1290,24 @@ def cycle(c):
         up = get(d["mgmt_ip"], args, O_UPTIME)
         rtt = int((time.time() - t0) * 1000) if up else None
         ifn = get(d["mgmt_ip"], args, O_IFNUM)
+
+        # Two independent questions, and the dashboard used to conflate them.
+        #   state     = is the SNMP agent answering? (this is what we monitor)
+        #   reachable = is the host answering at all?
+        # A router with a stopped snmpd still routes traffic. Recording that as
+        # "down" is what drew a healthy core as a red outage and then invented
+        # "2 uplinks down" on every switch hanging off it. Ask the cheaper
+        # question separately, and only when SNMP is silent: an SNMP reply has
+        # already proved the host is up.
         state = "up" if up else "down"
+        if up:
+            reachable, method = "up", "snmp"
+        else:
+            reachable, method = icmp_alive(d["mgmt_ip"])
+            reachable = "up" if reachable else "down"
+
         m = metric_metrics(d["mgmt_ip"], args) if state == "up" else {}
-        polled.append((d, state, m, up, ifn, rtt))
+        polled.append((d, state, m, up, ifn, rtt, reachable, method))
         if state == "up":
             # Key on the database hostname, never on SNMP sysName: two boxes
             # with a default sysName would otherwise overwrite each other's
@@ -1210,7 +1324,7 @@ def cycle(c):
     new_events = []
 
     # ---- 1. health samples, reachability, reboot detection
-    for d, state, m, up, ifn, rtt in polled:
+    for d, state, m, up, ifn, rtt, reachable, method in polled:
         up_s = parse_ticks(up)
         # The gap must be measured against the last successful poll, so capture
         # it BEFORE this cycle marks the device as reachable again.
@@ -1226,8 +1340,11 @@ def cycle(c):
                    m.get("net_in_bps"), m.get("net_out_bps")))
 
         if not (d["kind"] == "server" and d["hostname"] == "controller"):
+            # This table answers "could we reach it", not "did SNMP answer".
+            # Writing 0 for a device that pings fine but has a broken agent
+            # makes the reachability chart claim an outage that never happened.
             c.execute("INSERT INTO reach_samples(device_id, reachable, rtt_ms) VALUES (?,?,?)",
-                      (d["id"], 1 if state == "up" else 0, rtt))
+                      (d["id"], 1 if reachable == "up" else 0, rtt))
 
         # Only write a state-change event on a real transition. `last_state` is
         # NULL on the very first poll, and that is not "came up" - it would
@@ -1237,7 +1354,10 @@ def cycle(c):
                       "state %s -> %s" % (d["last_state"], state))
             if ev:
                 new_events.append(ev)
-            if state == "down":
+            # "unreachable" is a claim about the host, so it needs the host
+            # probe, not the SNMP reply. A silent agent on a live router gets
+            # the monitoring event above and nothing else.
+            if reachable == "down":
                 ev2 = emit(c, d["id"], "average", "%s unreachable" % d["hostname"])
                 if ev2:
                     new_events.append(ev2)
@@ -1291,8 +1411,11 @@ def cycle(c):
                     print("removed unidentified device %s after %ds" % (gone, UNKNOWN_TTL_S), flush=True)
                     continue
 
-        c.execute("UPDATE devices SET last_state=?, last_seen=datetime('now') WHERE id=?",
-                  (state, d["id"]))
+        c.execute("""UPDATE devices
+                     SET last_state=?, last_reachable=?, reach_method=?,
+                         last_seen=datetime('now')
+                     WHERE id=?""",
+                  (state, reachable, method, d["id"]))
 
     # ---- 2. leases
     try:
@@ -1305,12 +1428,23 @@ def cycle(c):
     # `emit` already deduplicates by signature only against *blocked* events,
     # so failures have to be rate-limited here or the table grows by two rows
     # every 5 s for every broken device.
-    for d, state, m, up, ifn, rtt in polled:
+    for d, state, m, up, ifn, rtt, reachable, method in polled:
         if state != "up":
             pat = classify("SNMP timeout: no response", patterns)
             if pat:
-                record_finding(c, pat, d["id"],
-                               "SNMP timeout: no response from %s (%s)" % (d["mgmt_ip"], d["hostname"]))
+                # Say which failure this is. "host down" and "agent stopped"
+                # are different incidents with different first checks, and
+                # filing both under one sentence is what let a working router
+                # look dead for weeks.
+                if reachable == "up":
+                    detail = ("SNMP agent not answering on %s (%s) but the host "
+                              "answers ICMP - reachable, unmonitored"
+                              % (d["mgmt_ip"], d["hostname"]))
+                else:
+                    detail = ("No response from %s (%s): SNMP silent and ICMP "
+                              "failed - host is unreachable"
+                              % (d["mgmt_ip"], d["hostname"]))
+                record_finding(c, pat, d["id"], detail)
         if m.get("disk_pct") and m["disk_pct"] >= 95:
             pat = classify("No space left on device", patterns)
             if pat:
@@ -1341,9 +1475,16 @@ def cycle(c):
     except Exception as e:
         print("alert error:", e, flush=True)
 
-    if len(unanswered) == len([d for d in devs
-                               if not (d["kind"] == "server" and d["hostname"] == "controller")]) and devs:
-        ev = emit(c, None, "disaster", "ALL %d devices unreachable" % len(devs))
+    # A "disaster" is a claim that nothing can be reached. Everything being
+    # silent on SNMP is a monitoring outage, not a network outage, so the test
+    # is the host probe. When every device pings but none answers SNMP the
+    # operator needs a different page - and with the default community that is
+    # exactly the state a fresh install lands in.
+    unreachable = [t for t in polled if t[6] == "down"]
+    polled_real = [t for t in polled
+                   if not (t[0]["kind"] == "server" and t[0]["hostname"] == "controller")]
+    if polled_real and len(unreachable) == len(polled_real):
+        ev = emit(c, None, "disaster", "ALL %d devices unreachable" % len(polled_real))
         if ev:
             new_events.append(ev)
             consider_alerts(c, [ev])
@@ -1363,8 +1504,14 @@ def cycle(c):
         c.execute("DELETE FROM health_samples WHERE ts < datetime('now', '-14 days')")
 
     c.commit()
-    print("cycle: %d up / %d down | leases %d seen, %d changed"
-          % (len(devs) - len(unanswered), len(unanswered), seen_count, len(changes)), flush=True)
+    # Report the two numbers separately. "3 down" used to mean three devices
+    # with a stopped snmpd, which read as three outages in the container log.
+    reachable_n = len([t for t in polled if t[6] == "up"])
+    blind = len([t for t in polled if t[6] == "up" and t[1] != "up"])
+    print("cycle: %d monitored / %d snmp-silent | %d reachable / %d unreachable "
+          "(%d reachable but unmonitored) | leases %d seen, %d changed"
+          % (len(devs) - len(unanswered), len(unanswered), reachable_n,
+             len(polled) - reachable_n, blind, seen_count, len(changes)), flush=True)
 
 
 UPTIME = {}
@@ -1393,6 +1540,7 @@ def main():
         started = time.time()
         try:
             c = conn()
+            ensure_reach_columns(c)
             if first:
                 seed_uptime(c)
                 first = False
