@@ -3010,8 +3010,11 @@ async function renderComplianceDevice(host) {
       </div>
     </div>
     <div class="panel" style="margin-top:9px;padding:13px 15px">
-      <div class="p-title" style="text-align:left;margin-bottom:8px">Declared rules</div>
+      <div class="p-title" style="text-align:left;margin-bottom:8px">Rule results</div>
       <ul class="cmp-rules">${rules || '<li class="muted">No rules recorded.</li>'}</ul>
+      <p class="muted" style="font-size:12px;margin-top:9px">${d.status === 'COMPLIANT'
+        ? 'Every declared rule matched. The audit stores the rules that failed, so a clean device shows one summary row rather than each rule.'
+        : 'The rules below failed. Declared rules that are not listed matched the running-config.'}</p>
     </div>
     ${note}`;
 }

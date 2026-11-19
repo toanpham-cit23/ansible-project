@@ -849,3 +849,72 @@ unreachable, which is the case no human can fix from outside.
 
 Verification: 4 Python tests, Go compliance tests, `PARITY OK`, guard 6/6,
 demos 3/3, `node` syntax check on `app.js`, `go vet` clean on the API package.
+
+### 14.6 The drift badge never fired for the case it was built for — 2026-11-19
+
+Building the compliance demos (§14.7) found a defect in the feature as shipped
+in §14.2. The demos are the reason it was found: each one asserts on what the
+page would render, and demo 1 failed.
+
+**The defect.** `saveResults` stores a compliant device as a **single**
+`All required rules` row, not one row per rule. `handleComplianceDevice` finds
+"changed" by looking each current rule up in the previous run's rule map. For a
+device that was compliant last time, that map contains only the summary row — so
+every real rule is absent, `seen` is false, and `changed` is false.
+
+The consequence is precise and bad: the bond from *compliant last audit* to
+*non-compliant this audit* is the one transition the badge exists to report, and
+it was the one transition it could never report. A router that fails from the
+start shows its failing rules with no badge (correct — nothing changed), and a
+router that someone breaks by hand also showed no badge. The feature worked
+except in the case it was designed for.
+
+**The fix** is in `compareRules` (extracted from the handler so the tests call
+the shipped code, not a copy). When the previous run was `COMPLIANT` and a rule
+now fails, the rule's prior result is inferred as compliant. The inference holds
+because the writer omits per-rule rows *only* when every declared rule matched.
+
+Two boundaries were deliberate:
+
+- **Restricted to `NON_COMPLIANT` current rows.** An `ERROR` device stores one
+  synthetic `Configuration collection` row that is not a rule at all; nothing
+  was evaluated, so nothing may be reported as changed. Without this restriction
+  a network outage renders as drift — demo 3 caught exactly that over-reach in
+  the first attempt at the fix.
+- **Stated caveat:** a rule *added* to `desired_state.yml` between two audits was
+  never evaluated before and is reported as changed. That is rare and
+  human-authored, and silence about real drift is the worse failure.
+
+**Regression test.** `TestCompliantToBrokenIsReportedAsChanged` seeds a
+compliant run (one summary row) and a failing run, then asserts `changed == 1`.
+Verified to fail when the inference is disabled and pass when it is restored.
+`TestUnreachableIsNotReportedAsChanged` pins the `ERROR` boundary.
+
+**A second, smaller correction.** The device panel was headed *Declared rules*
+and implied every rule was listed. It only ever listed the failures. The heading
+is now *Rule results*, with a line stating that a clean device shows one summary
+row because the audit stores failures. The page no longer claims more than the
+schema holds.
+
+### 14.7 Compliance demos
+
+`files/ops/demo_compliance.py`, 3/3 passing. It imports the real auditor, uses
+the real `desired_state.yml`, writes a real database, and reads the device
+back with the queries from `compliance_device.go`.
+
+| Demo | Edit on the router | Result |
+| --- | --- | --- |
+| 1 | `no network 192.168.23.0/24 area 0` on r1 | r1 `NON_COMPLIANT`, rule marked changed from compliant; r2 unchanged |
+| 2 | Banner, static route, stray interface on r2 | r2 `COMPLIANT`, nothing marked changed — outside the declared list |
+| 3 | SSH to r3 fails, snapshot deleted | `ERROR`, previous result stands, no change flagged |
+
+| File | Change |
+| --- | --- |
+| `files/ops/demo_compliance.py` | New: three demos against the real auditor |
+| `files/dashboard/docker/api-go/compliance_device.go` | `compareRules` extracted; compliant-to-broken inference |
+| `files/dashboard/docker/api-go/compliance_device_test.go` | Two regression tests for the inference and its boundary |
+| `files/dashboard/docker/api/static/js/app.js` | Panel copy matches what is stored |
+| `files/ops/README.md` | Demo section |
+
+Verification: `ok labapi` with the two new tests (each confirmed to fail when its
+guard is removed), demos 3/3, `node --check` clean, `go vet` clean.

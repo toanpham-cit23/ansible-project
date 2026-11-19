@@ -62,14 +62,6 @@ func handleComplianceDevice(w http.ResponseWriter, r *http.Request, u *User) {
 		prev, _ = loadDeviceRules(prevRun, host)
 	}
 
-	type ruleOut struct {
-		Rule    string `json:"rule"`
-		Status  string `json:"status"`
-		Detail  string `json:"detail"`
-		Before  string `json:"before,omitempty"`
-		Changed bool   `json:"changed"`
-	}
-
 	prevByRule := map[string]string{}
 	if prev != nil {
 		for _, f := range prev.Findings {
@@ -77,16 +69,7 @@ func handleComplianceDevice(w http.ResponseWriter, r *http.Request, u *User) {
 		}
 	}
 
-	out := make([]ruleOut, 0, len(cur.Findings))
-	changed := 0
-	for _, f := range cur.Findings {
-		before, seen := prevByRule[f.Rule]
-		ch := seen && before != f.Status
-		if ch {
-			changed++
-		}
-		out = append(out, ruleOut{Rule: f.Rule, Status: f.Status, Detail: f.Detail, Before: before, Changed: ch})
-	}
+	out, changed := compareRules(cur, prev, prevByRule)
 
 	resp := map[string]any{
 		"hostname":   host,
@@ -107,6 +90,58 @@ func handleComplianceDevice(w http.ResponseWriter, r *http.Request, u *User) {
 type deviceRules struct {
 	Status   string
 	Findings []ruleRow
+}
+
+// ruleOut is one declared rule's result, with how it changed since the previous
+// audit of this device.
+type ruleOut struct {
+	Rule    string `json:"rule"`
+	Status  string `json:"status"`
+	Detail  string `json:"detail"`
+	Before  string `json:"before,omitempty"`
+	Changed bool   `json:"changed"`
+}
+
+// compareRules pairs this run's rule results with the previous run's and marks
+// the ones whose outcome moved. prevByRule is the previous run's rule->status
+// map, passed in so the caller does not have to build it twice.
+//
+// A compliant device is stored as a single synthetic "All required rules" row
+// rather than one row per rule, so a compliant previous run carries no per-rule
+// evidence. Taken literally, that makes a rule which passed last time and fails
+// now look brand new, "changed" stays false, and the one case the badge exists
+// for - a working router that someone broke by hand - is the one case it never
+// reports.
+//
+// The inference is sound because the writer only omits per-rule rows when the
+// device was COMPLIANT, which by definition means every declared rule matched.
+// A rule missing from a previous COMPLIANT run therefore passed.
+//
+// It is restricted to NON_COMPLIANT current rows on purpose: an ERROR device
+// carries one synthetic "Configuration collection" row, which is not a rule at
+// all - nothing was evaluated, so nothing can have changed.
+//
+// Caveat, stated rather than hidden: if a rule was added to desired_state.yml
+// between the two runs, it was never evaluated before, and this reports it as a
+// change. That is a rare, human-authored event, and the alternative - staying
+// silent about real drift - is worse.
+func compareRules(cur, prev *deviceRules, prevByRule map[string]string) ([]ruleOut, int) {
+	prevWasClean := prev != nil && prev.Status == "COMPLIANT"
+
+	out := make([]ruleOut, 0, len(cur.Findings))
+	changed := 0
+	for _, f := range cur.Findings {
+		before, seen := prevByRule[f.Rule]
+		if !seen && prevWasClean && f.Status == "NON_COMPLIANT" {
+			before, seen = "COMPLIANT", true
+		}
+		ch := seen && before != f.Status
+		if ch {
+			changed++
+		}
+		out = append(out, ruleOut{Rule: f.Rule, Status: f.Status, Detail: f.Detail, Before: before, Changed: ch})
+	}
+	return out, changed
 }
 
 type ruleRow struct {

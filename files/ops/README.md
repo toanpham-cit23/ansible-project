@@ -223,6 +223,43 @@ python3 files/ops/demo_rollback.py     # 3/3 scenarios behaved as designed
 Demo 1 is the one that matters: the host is genuinely unreachable at the point
 the guard fires, which is exactly the case a human cannot fix from outside.
 
+## Compliance demos — what the dashboard says when someone edits a router
+
+`demo_compliance.py` answers the question the module's contract leaves open. The
+module only checks that the rules declared in
+`compliance/config/desired_state.yml` are present in the running-config; it never
+judges configuration outside that list and never changes a router. So when an
+operator edits a router by hand, what does the operator see?
+
+The demos run the **real** auditor (`compliance/scripts/run_compliance.py`)
+against real FRR-shaped snapshots, write to a real SQLite database, and read the
+result back with the same queries the Go endpoint uses. The panel printed is what
+the Compliance page would render, not a mock-up of it.
+
+```sh
+python3 files/ops/demo_compliance.py     # 3/3 demos behaved as designed
+```
+
+| Demo | What happens on the router | What the dashboard shows |
+| --- | --- | --- |
+| 1 | `no network 192.168.23.0/24 area 0` on r1, outside the pipeline | r1 flips to **NON_COMPLIANT**, that rule is listed with a "changed · was compliant" badge; r2 is untouched and reports no change |
+| 2 | A banner, a static route and a stray interface added to r2 | r2 stays **COMPLIANT**, nothing marked changed — no declared rule depends on those lines |
+| 3 | SSH to r3 fails; the old snapshot is deleted | **ERROR**, not a compliance verdict; the previous known result stands and no rule is marked changed |
+
+Demo 2 is the scope boundary made visible. The banner, the static route and the
+interface are real changes to the router that this module will never report,
+because the audit answers "are the required rules present", not "is this
+configuration good". They need review by other means.
+
+Demo 3 is why `ERROR` is a separate state: a network outage must not look like
+drift, and a stale snapshot must not produce a confident verdict about a router
+nobody could read.
+
+One note on what the page lists. The audit stores the rules that **failed**, plus
+a single `All required rules` row for a device that passed — it is not a per-rule
+checklist of every router. That is why demo 2's panel shows one summary row
+rather than the five declared rules.
+
 ## Retention
 
 `retention.py` prunes time-series tables older than 180 days, expired sessions,

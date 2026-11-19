@@ -74,6 +74,108 @@ func TestLoadDeviceRulesReadsStatusAndOrder(t *testing.T) {
 	}
 }
 
+// The synthetic row a compliant device is stored as. Not a declared rule, but
+// the writer emits it so the dashboard can show the device was checked.
+const ruleAllOKRow = "All required rules"
+
+// seedRun inserts one audit. findings is (host, status, rule) per row.
+func seedRun(t *testing.T, id int64, checkedAt, status string, findings [][3]string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO compliance_runs
+		(id,checked_at,status,devices_total,devices_compliant,devices_noncompliant,devices_error)
+		VALUES (?,?,'ERROR',1,0,0,0)`, id, checkedAt); err != nil {
+		t.Fatalf("seed run %d: %v", id, err)
+	}
+	for _, f := range findings {
+		if _, err := db.Exec(`INSERT INTO compliance_findings (run_id,hostname,status,rule,detail)
+			VALUES (?,?,?,?,'')`, id, f[0], f[1], f[2]); err != nil {
+			t.Fatalf("seed finding: %v", err)
+		}
+	}
+	_ = status
+}
+
+// A device that passed last audit and fails this one must be reported as
+// changed. This is the case the page exists for: a working router that someone
+// edited by hand. It regressed once - the writer stores only a single
+// "All required rules" row for a compliant device, so the previous run had no
+// per-rule row to compare against and `changed` stayed false for the exact
+// transition the badge is meant to surface.
+func TestCompliantToBrokenIsReportedAsChanged(t *testing.T) {
+	withTestDB(t)
+
+	// Run 1: r1 fully compliant, so the writer stored one summary row.
+	seedRun(t, 1, "2026-11-19T08:01:00+00:00", "COMPLIANT", [][3]string{
+		{"r1", "COMPLIANT", ruleAllOKRow},
+	})
+	// Run 2: one declared rule now fails.
+	const broken = "^\\s*network 192\\.168\\.23\\.0/24 area 0$"
+	seedRun(t, 2, "2026-11-19T08:02:00+00:00", "NON_COMPLIANT", [][3]string{
+		{"r1", "NON_COMPLIANT", broken},
+	})
+
+	cur, err := loadDeviceRules(2, "r1")
+	if err != nil || cur == nil {
+		t.Fatalf("loadDeviceRules: %v %v", cur, err)
+	}
+	prev, err := loadDeviceRules(1, "r1")
+	if err != nil || prev == nil {
+		t.Fatalf("loadDeviceRules(prev): %v %v", prev, err)
+	}
+	if prev.Status != "COMPLIANT" {
+		t.Fatalf("previous status = %q, want COMPLIANT", prev.Status)
+	}
+
+	before := map[string]string{}
+	for _, f := range prev.Findings {
+		before[f.Rule] = f.Status
+	}
+	// Fixture guard: a compliant run really does have no per-rule row for the
+	// rule that later breaks. If the writer ever starts storing per-rule rows
+	// for compliant devices, this assertion should be revisited deliberately.
+	if _, seen := before[broken]; seen {
+		t.Fatalf("fixture is wrong: %q should have no row in a compliant run", broken)
+	}
+
+	out, changed := compareRules(cur, prev, before)
+	if changed != 1 {
+		t.Fatalf("changed = %d, want 1: a compliant router that broke a rule must be flagged", changed)
+	}
+	if !out[0].Changed || out[0].Before != "COMPLIANT" {
+		t.Fatalf("rule = %+v, want changed from COMPLIANT", out[0])
+	}
+}
+
+// An unreachable device stores one "Configuration collection" row. Nothing was
+// evaluated, so nothing may be reported as changed even though the previous
+// run was compliant - otherwise a network outage would look like drift.
+func TestUnreachableIsNotReportedAsChanged(t *testing.T) {
+	withTestDB(t)
+	seedRun(t, 1, "2026-11-19T08:01:00+00:00", "COMPLIANT", [][3]string{
+		{"r3", "COMPLIANT", ruleAllOKRow},
+	})
+	seedRun(t, 2, "2026-11-19T08:02:00+00:00", "ERROR", [][3]string{
+		{"r3", "ERROR", "Configuration collection"},
+	})
+
+	cur, err := loadDeviceRules(2, "r3")
+	if err != nil || cur == nil {
+		t.Fatalf("loadDeviceRules: %v %v", cur, err)
+	}
+	prev, err := loadDeviceRules(1, "r3")
+	if err != nil || prev == nil {
+		t.Fatalf("loadDeviceRules(prev): %v %v", prev, err)
+	}
+
+	out, changed := compareRules(cur, prev, map[string]string{})
+	if changed != 0 {
+		t.Fatalf("changed = %d, want 0: an unreachable device is not drift", changed)
+	}
+	if out[0].Changed || out[0].Status != "ERROR" {
+		t.Fatalf("rule = %+v, want an unchanged ERROR row", out[0])
+	}
+}
+
 func TestURLRoundTrip(t *testing.T) {
 	host := "r1"
 	if got := urlEscape(host); got != "r1" {
