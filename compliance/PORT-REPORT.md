@@ -697,3 +697,63 @@ only drawn. `playbooks/16_vlan.yml` is still deliberately not imported into
 | `files/dashboard/docker/api/static/js/app.js` | English empty state with the correct `--db` command |
 | `files/ops/test_fw_guard.py` | New offline 180 s guard test |
 | `files/ops/README.md` | Guard timing and test instructions |
+
+---
+
+## 13. Topology red markers — 2026-11-19 follow-up
+
+The owner reported that the monitoring topology was still red and that the
+previous check had not resolved it. The screenshot showed six red "routers",
+each access switch marked with one failed uplink, and no online hosts.
+
+### 13.1 Two different causes
+
+**Genuine:** r1, r2 and r3 answer ICMP ping but do **not** answer SNMP from
+this workstation (`sysDescr.0` on UDP/161 times out for all three). SSH is also
+closed to us (§12.1). The dashboard's poller marks a device `down` when its
+SNMP get fails, so those three cards are reporting a real monitoring failure.
+It cannot be cleared from here: it needs the SNMP agent restored on the
+routers or the controller's access to it repaired. The poller image does
+include `net-snmp-tools`, so a missing client is not the cause.
+
+**False:** `test-router`, `test-switch` and `test-laptop` (`.14`–`.16`) do not
+answer ping and are not in the repository. They were added to the live
+inventory. The topology formerly drew **every** non-controller device in the
+OSPF core row and counted it as a router, which produced two wrong statements:
+a switch or laptop was called a "router down", and it inherited the same
+alarm styling as a real cabled router.
+
+### 13.2 Code fix
+
+`app.js` now selects only `effective_kind === 'router'` devices for the core
+row, and separates three states instead of two:
+
+| State | Meaning | Drawing |
+|---|---|---|
+| `up` | SNMP health answered | normal card |
+| `down` | SNMP answered that the device is down | red card + X |
+| empty / `unknown` | never successfully polled | neutral card + warning note |
+
+`isDown()` and `isUnknown()` are used consistently for the controller link,
+OSPF adjacency lines, the router cards, switch uplink loss and the
+"routers down" counter. A never-polled device is no longer presented as a
+confirmed fault.
+
+`files/dashboard/docker/api/static/js/test_topology_state.js` extracts those
+predicates from the real `app.js` and checks five cases (core-row membership,
+confirmed down, unknown, up, and the two helper boundaries). **5/5 pass**;
+`node` syntax check clean.
+
+After this fix the screenshot's "6 routers down" would become "1 router down"
+for the real r1 plus the added `test-router` if it is still classified as a
+router — the three genuine red cards remain **until SNMP is restored**, which
+is the honest result. Removing that red without fixing the agent would be a
+false green.
+
+### 13.3 What still has to happen
+
+Restore SNMP on r1/r2/r3 (`04_snmp.yml` installs and starts snmpd; it requires
+the gitignored `files/snmp/*.apk` on the Controller), then confirm the cards
+clear on the next poll. Decide whether the three test devices should remain in
+inventory; they are not part of the designed lab and are kept visible in the
+inventory table rather than being silently deleted.

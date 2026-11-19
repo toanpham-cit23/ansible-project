@@ -871,11 +871,16 @@ function labTopology(t, leases) {
   // otherwise be found first (lower id) and hijack the whole diagram's centre.
   const ctrl = t.nodes.find((n) => n.hostname === 'controller')
     || t.nodes.find((n) => n.effective_kind === 'server');
-  // Everything that is not the controller is drawn in the middle row, switches
-  // included. A switch added by hand has no designed trunk, so it hangs off
-  // nothing but the controller poll - which is exactly what "added as a test
-  // node" means. Filtering switches out here made them invisible.
-  const routers = t.nodes.filter((n) => n.id !== (ctrl && ctrl.id));
+  // Only devices classified as routers belong in the OSPF core row. A device
+  // added for testing is frequently guessed as a router by the poller, and
+  // drawing it here produced two wrong statements at once: it was counted as
+  // "routers down" when it was simply offline, and it inherited an X flag as
+  // though a designed uplink had failed. Unknown/test devices stay visible in
+  // the inventory table and in "unplaced" below, not in the designed fabric.
+  // A second server is also excluded: the controller is selected by name
+  // above precisely so a test server cannot hijack the centre of the picture.
+  const routers = t.nodes.filter((n) => n.id !== (ctrl && ctrl.id)
+    && n.effective_kind === 'router');
 
   // A router's own management address shows up in its neighbours' ARP tables,
   // so without this the diagram draws r1, r2, r3 and the controller a second
@@ -899,6 +904,11 @@ function labTopology(t, leases) {
     const l = known.get(mac);
     return !!l && Number(l.online) === 1 && !l.blocked;
   };
+  // Three states, not two: 'up', 'down' (SNMP answered that it is down), and
+  // unknown (no successful poll yet). Collapsing the last two into one made a
+  // newly added device appear as a fault before it had ever been measured.
+  const isDown = (r) => r.last_state === 'down';
+  const isUnknown = (r) => !r.last_state || r.last_state === 'unknown';
 
   // Everything wrong with everything, keyed so a click can find it again.
   // Nothing here is invented: each entry is a row in the database that says so.
@@ -1025,7 +1035,10 @@ function labTopology(t, leases) {
   routers.forEach((r, i) => {
     const plan = upOf(i);
     const [rx, ry] = rPt[i];
-    const dead = r.last_state !== 'up';
+    // A row with no state at all has never been polled successfully. Drawing
+    // it as "down" invented a failure the database never reported; an X on a
+    // device that has simply not answered its first poll is a false alarm.
+    const dead = r.last_state === 'down';
     // A device we cannot identify has no known cabling. Drawing guessed links
     // to the switches would be an assertion the data does not support, so the
     // only path kept is the one that is measured: the controller's poll.
@@ -1052,7 +1065,7 @@ function labTopology(t, leases) {
         .filter((si) => via[si] === i).flatMap((si) => macsOn(si)).join(' ');
       const [ax, ay] = edgeOf(ctrlPt[0], ctrlPt[1], CW, CH, p[0], p[1]);
       const [bx, by] = edgeOf(p[0], p[1], RW, RH, ctrlPt[0], ctrlPt[1]);
-      if (r.last_state !== 'up') {
+      if (isDown(r)) {
         // blinking, not crossed: the poll is still being attempted, it is just
         // not answered. A cross means "cut on purpose".
         line(ax, ay, bx, by, 'tp-ctrl-blink', path);
@@ -1067,7 +1080,7 @@ function labTopology(t, leases) {
     const ib = routers.findIndex((r) => r.id === l.b_device_id);
     if (ia < 0 || ib < 0) continue;
     const a = rPt[ia], b = rPt[ib];
-    const bad = routers[ia].last_state !== 'up' || routers[ib].last_state !== 'up';
+    const bad = isDown(routers[ia]) || isDown(routers[ib]);
     const cls = bad ? 'tp-blocked' : 'tp-peer';
     if (Math.abs(ia - ib) === 1) {
       const [ax, ay] = edgeOf(a[0], a[1], RW, RH, b[0], b[1]);
@@ -1119,7 +1132,11 @@ function labTopology(t, leases) {
     const path = LAB.switches.map((_, si) => si)
       .filter((si) => via[si] === i).flatMap((si) => macsOn(si)).join(' ');
     const key = 'dev:' + r.id;
-    const down = r.last_state !== 'up';
+    const down = isDown(r);
+    if (isUnknown(r) && !down) {
+      note(key, r.hostname, 'warn', 'No successful health poll yet. The device is drawn '
+        + 'without a fault flag until the poller has a result; check the inventory if it stays this way.');
+    }
     if (down) {
       const carried = plan.primary.map((si) => LAB.switches[si]);
       const spared = plan.backup.map((si) => LAB.switches[si]);
@@ -1149,7 +1166,7 @@ function labTopology(t, leases) {
     // still carrying traffic.
     const plan = routers.map((r, ri) => ({ r, ri }))
       .filter((q) => upOf(q.ri).primary.includes(i) || upOf(q.ri).backup.includes(i));
-    const lost = plan.filter((q) => q.r.last_state !== 'up');
+    const lost = plan.filter((q) => isDown(q.r));
     const live = plan.length - lost.length;
     const key = 'sw:' + i;
     if (lost.length) {
@@ -1250,7 +1267,7 @@ function labTopology(t, leases) {
     hosts: online, planned: LAB.hosts.length,
     terminated, idle: LAB.hosts.length - online - terminated,
     unplaced: unplaced.length,
-    routersDown: routers.filter((r) => r.last_state !== 'up').length,
+    routersDown: routers.filter(isDown).length,
     flagged: Object.keys(issues).length,
   };
 }
