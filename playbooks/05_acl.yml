@@ -14,7 +14,10 @@
           -c 'write memory'
       register: acl_result
       changed_when: "'%' not in acl_result.stdout"
-      failed_when: "'Unknown command' in acl_result.stdout or 'Incomplete command' in acl_result.stdout"
+      failed_when: >-
+        acl_result.rc != 0 or
+        'Unknown command' in acl_result.stdout or
+        'Incomplete command' in acl_result.stdout
 
     - name: Show ACL creation output
       ansible.builtin.debug:
@@ -33,7 +36,10 @@
           -c 'write memory'
       register: acl_apply
       changed_when: "'%' not in acl_apply.stdout"
-      failed_when: false
+      failed_when: >-
+        acl_apply.rc != 0 or
+        'Unknown command' in acl_apply.stdout or
+        'Incomplete command' in acl_apply.stdout
 
     - name: Show ACL apply output
       ansible.builtin.debug:

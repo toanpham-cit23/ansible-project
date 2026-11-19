@@ -8,12 +8,18 @@
 #
 # Reads vlans + interfaces from SQLite. Requires iproute2 (busybox ip cannot
 # create VLAN devices). Persists via /etc/local.d so it survives reboot.
+#
+# This play targets the [routers] group: those are the only devices the
+# inventory defines. It used to say `hosts: network_devices`, a group that
+# exists nowhere, so every run skipped with "skipping: no hosts matched".
 - name: VLAN sub-interfaces
-  hosts: network_devices
+  hosts: routers
   gather_facts: no
   vars:
     uplink: "{{ uplink_iface | default('eth1') }}"
-    vlan_dev: "{{ uplink }}.{{ item }}"
+    # Path to the lab database on the CONTROL node - the lookup is delegated to
+    # localhost. Defaults to where the dashboard keeps net.db.
+    db_path: "{{ netdb_path | default('/root/ansible-project/files/dashboard/db/net.db') }}"
 
   tasks:
     - name: Require iproute2
@@ -22,27 +28,59 @@
       register: ip_bin
       failed_when: ip_bin.rc != 0
 
+    - name: Confirm the lab database is readable on the control node
+      ansible.builtin.stat:
+        path: "{{ db_path }}"
+      delegate_to: localhost
+      register: vlan_db
+      changed_when: false
+
     - name: Load VLAN definitions
       ansible.builtin.shell: |
-        sqlite3 {{ db_path }} -separator '|' \
-          "SELECT vlan_id, name FROM vlans WHERE site_id IS NULL OR site_id = \
-           (SELECT site_id FROM devices WHERE hostname='{{ inventory_hostname }}')"
+        sqlite3 {{ db_path }} \
+          "SELECT vlan_id FROM vlans WHERE site_id IS NULL OR site_id = \
+           (SELECT site_id FROM devices WHERE hostname='{{ inventory_hostname }}') \
+           ORDER BY vlan_id"
       delegate_to: localhost
       register: vlan_rows
       changed_when: false
-      when: db_path is defined
+      when: vlan_db.stat.exists
+
+    # The query was registered as vlan_rows and then never consumed: the loop
+    # below and the persisted script both rendered from `vlan_ids | default([])`,
+    # which is always empty, so the play "succeeded" having created nothing.
+    #
+    # Selecting vlan_id alone keeps this a plain one-id-per-line list. Parsing
+    # "id|name" would need a split or a regex_replace, and both are traps here:
+    # `split` is not a Jinja filter at all, and regex_replace's '\1' is read by
+    # Jinja as the control character chr(1), so it silently yields junk.
+    - name: Derive the VLAN id list
+      ansible.builtin.set_fact:
+        vlan_ids: >-
+          {{ vlan_rows.stdout_lines | default([])
+             | map('trim') | select('match', '^[0-9]+$') | list }}
+
+    - name: Fail when the database has no VLANs for this device
+      ansible.builtin.fail:
+        msg: >-
+          No VLAN definitions found for {{ inventory_hostname }}. Either
+          {{ db_path }} is missing or unreadable (exists={{ vlan_db.stat.exists }})
+          or the vlans table has no rows for this site. sqlite3 said:
+          "{{ vlan_rows.stderr | default('') | trim }}". Refusing to report
+          success without having configured anything.
+      when: vlan_ids | length == 0
 
     - name: Create sub-interfaces
       ansible.builtin.shell: |
         set -e
-        dev="{{ vlan_dev }}"
+        dev="{{ uplink }}.{{ item }}"
         ip link show "$dev" >/dev/null 2>&1 || ip link add link {{ uplink }} name "$dev" type vlan id {{ item }}
         ip link set "$dev" up
         ip -d link show "$dev" | grep -q "vlan protocol 802.1Q id {{ item }}" \
           && echo "VLAN_OK {{ item }}" || { echo "VLAN_FAIL {{ item }}"; exit 1; }
       args:
         executable: /bin/sh
-      loop: "{{ vlan_ids | default([]) }}"
+      loop: "{{ vlan_ids }}"
       register: vlan_result
       changed_when: "'VLAN_OK' in vlan_result.stdout"
 
@@ -52,7 +90,7 @@
         mode: '0755'
         content: |
           #!/bin/sh
-          {% for v in vlan_ids | default([]) %}
+          {% for v in vlan_ids %}
           ip link show {{ uplink }}.{{ v }} >/dev/null 2>&1 || \
             ip link add link {{ uplink }} name {{ uplink }}.{{ v }} type vlan id {{ v }}
           ip link set {{ uplink }}.{{ v }} up
@@ -64,4 +102,6 @@
 
     - name: Report
       ansible.builtin.debug:
-        msg: "{{ vlan_result.results | default([]) | map(attribute='stdout') | select('search','VLAN_OK') | list }}"
+        msg:
+          - "VLANs requested: {{ vlan_ids | join(', ') }}"
+          - "Created: {{ vlan_result.results | default([]) | map(attribute='stdout') | select('search','VLAN_OK') | list }}"

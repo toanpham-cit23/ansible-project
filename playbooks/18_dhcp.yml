@@ -7,18 +7,39 @@
 # 05_dhcp.yml - dnsmasq scopes generated from the subnets table
 #
 # One config file per subnet, so adding a scope is an INSERT, not an edit.
+#
+# Targets [routers]: the only group the inventory defines. It used to say
+# `hosts: network_devices`, which matched nothing, so the play was a no-op.
 - name: DHCP scopes
-  hosts: network_devices
+  hosts: routers
   gather_facts: no
   vars:
     dhcp_scopes: "{{ scopes | default([]) }}"
 
-  tasks:
+  pre_tasks:
     - name: Require dnsmasq
       ansible.builtin.shell: command -v dnsmasq
       changed_when: false
       register: dnsmasq_bin
       failed_when: dnsmasq_bin.rc != 0
+
+    - name: Fail when there are no scopes to render
+      ansible.builtin.fail:
+        msg: >-
+          No DHCP scopes were supplied for {{ inventory_hostname }}. Pass them
+          as -e scopes='[...]' or load them from the subnets table first.
+          Rendering this file from an empty list would leave dnsmasq with no
+          ranges while the play still reported success.
+      when: dhcp_scopes | length == 0
+
+  tasks:
+    # dnsmasq.d does not exist until dnsmasq has been configured once, and copy
+    # will not create it, so a first run failed here.
+    - name: Ensure the dnsmasq include directory exists
+      ansible.builtin.file:
+        path: /etc/dnsmasq.d
+        state: directory
+        mode: '0755'
 
     - name: Render scopes
       ansible.builtin.copy:
@@ -31,23 +52,33 @@
           bind-dynamic
           {% for s in dhcp_scopes %}
           # {{ s.cidr }} {{ s.description | default('') }}
-          dhcp-range={{ s.range_start }},{{ s.range_end }},{{ s.netmask }},{{ s.lease | default('12h') }}
-          dhcp-option=tag:{{ s.vlan_id | default(0) }},3,{{ s.gateway }}
-          dhcp-option=option:dns-server,{{ s.dns | default(s.gateway) }}
+          # `set:` tags the clients of this range. The options below match on
+          # that tag, and without it they were never applied to anyone: the
+          # file said tag:10 while no client had ever been given tag 10.
+          dhcp-range=set:vlan{{ s.vlan_id | default(0) }},{{ s.range_start }},{{ s.range_end }},{{ s.netmask }},{{ s.lease | default('12h') }}
+          dhcp-option=tag:vlan{{ s.vlan_id | default(0) }},3,{{ s.gateway }}
+          dhcp-option=tag:vlan{{ s.vlan_id | default(0) }},6,{{ s.dns | default(s.gateway) }}
           {% endfor %}
       register: dhcp_conf
 
-    - name: Enable and start dnsmasq
+    - name: Restart dnsmasq when the scopes changed
       ansible.builtin.shell: |
         set -e
         rc-update add dnsmasq default 2>/dev/null || true
-        {% if dhcp_conf.changed %}rc-service dnsmasq restart{% else %}rc-service dnsmasq start{% endif %} 2>/dev/null || rc-service dnsmasq start
+        rc-service dnsmasq restart 2>/dev/null || rc-service dnsmasq start
         sleep 1
-        rc-service dnsmasq status >/dev/null 2>&1 && echo DHCP_OK || { echo DHCP_FAIL; exit 1; }
       args:
         executable: /bin/sh
+      when: dhcp_conf.changed
       register: dhcp_svc
-      changed_when: dhcp_conf.changed
+      changed_when: true
+
+    - name: Confirm dnsmasq is running
+      ansible.builtin.shell: rc-service dnsmasq status >/dev/null 2>&1 && echo RUNNING || echo STOPPED
+      args:
+        executable: /bin/sh
+      changed_when: false
+      register: dhcp_running
 
     - name: Confirm the listener
       ansible.builtin.shell: |
@@ -57,8 +88,20 @@
       changed_when: false
       register: dhcp_listen
 
+    # Previously a bare `echo DHCP_FAIL` inside a `||` group: the shell still
+    # exited 0 from the `true` branch above it, so the play went green with no
+    # DHCP server. Failing explicitly here is the whole point of the check.
+    - name: Fail when DHCP is not actually serving
+      ansible.builtin.fail:
+        msg: >-
+          DHCP is not serving on {{ inventory_hostname }}: service is
+          {{ dhcp_running.stdout }} and no UDP listener on port 67.
+          Run `dnsmasq --test` and check /var/log/messages.
+      when: "'RUNNING' not in dhcp_running.stdout or 'LISTEN_OK' not in dhcp_listen.stdout"
+
     - name: Report
       ansible.builtin.debug:
         msg:
-          - "{{ dhcp_svc.stdout_lines | default([]) }}"
+          - "Service: {{ dhcp_running.stdout }}"
+          - "Scopes: {{ dhcp_scopes | length }}"
           - "{{ dhcp_listen.stdout | trim }}"

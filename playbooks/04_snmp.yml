@@ -8,7 +8,7 @@
       ansible.builtin.file:
         path: /tmp/snmp-pkgs
         state: absent
-    - name: Create /tmp/snmp.pkgs directory
+    - name: Create /tmp/snmp-pkgs directory
       ansible.builtin.file:
         path: /tmp/snmp-pkgs
         state: directory
@@ -37,6 +37,11 @@
     - name: Install all packages from local file
       ansible.builtin.shell: apk add --allow-untrusted --no-network /tmp/snmp-pkgs/*.apk
       register: snmp_install
+      # This used to have no failure test, so a failed install was reported as
+      # success and the play carried on to configure a daemon that was not
+      # there. That is how the routers ended up with no snmpd at all while the
+      # dashboard was told the deployment was fine.
+      failed_when: snmp_install.rc != 0
     - name: Restart FRR after package install
       ansible.builtin.shell: |
         rc-service frr stop
@@ -52,7 +57,13 @@
         TERM=dumb vtysh -c 'conf t' -c 'agentx' -c 'end' -c 'wr mem'
       register: frr_agentx
       changed_when: "'%' not in frr_agentx.stdout"
-      failed_when: false
+      # A vtysh syntax error used to be ignored here. The play then restarted
+      # snmpd against a master socket FRR never opened, and `snmpd` answered
+      # only Linux MIBs - which is the "SNMP silent" the dashboard saw.
+      failed_when: >-
+        frr_agentx.rc != 0 or
+        'Unknown command' in frr_agentx.stdout or
+        'Incomplete command' in frr_agentx.stdout
 
     - name: Show AgentX output
       ansible.builtin.debug:
@@ -84,24 +95,35 @@
         dest: /etc/snmp/snmpd.conf
         mode: '0644'
     - name: Verify snmpd binary exists
-      ansible.builtin.shell: which snmpd || ls /usr/sbin/snmpd
+      ansible.builtin.shell: command -v snmpd || ls /usr/sbin/snmpd
       register: snmpd_library
-      ignore_errors: yes
+      changed_when: false
+      failed_when: false
+
     - name: Show snmpd binary path
       ansible.builtin.debug:
-        msg: "snmpd binary: {{ snmpd_library.stdout | default('NOT FOUND') }}"
+        msg: "snmpd binary: {{ snmpd_library.stdout | default('NOT FOUND', true) }}"
+
+    - name: Stop when the snmpd binary is missing after the install
+      # The old flow printed "NOT FOUND" and continued to `rc-service snmpd
+      # start`, which fails on the else-branch and still reports success. Fail
+      # here instead, where the reason is unambiguous.
+      ansible.builtin.fail:
+        msg: >-
+          snmpd is not installed on {{ inventory_hostname }} after apk add.
+          Check that the .apk files in files/snmp/ are built for this Alpine
+          release (apk add --allow-untrusted still verifies the package
+          metadata). Output: {{ snmp_install.stdout }}
+      when: snmpd_library.rc != 0
+
     - name: Enable and start snmpd service
       ansible.builtin.shell: |
-        if [ -f /etc/init.d/snmpd ]; then
-          rc-update add snmpd
-          rc-service snmpd start
-          sleep 2
-          rc-service snmpd status
-        else
-          echo "Service file /etc/init.d/snmpd not found"
-          ls /etc/init.d/ | grep -i snmp || echo "No SNMP service files"
-        fi
+        rc-update add snmpd
+        rc-service snmpd start
+        sleep 2
+        rc-service snmpd status
       register: snmpd_start
+      failed_when: snmpd_start.rc != 0
     - name: Wait for snmpd to be ready
       ansible.builtin.pause:
         seconds: 3
@@ -130,4 +152,19 @@
           SNMP on {{ inventory_hostname }}:
           {{ 'OK - snmpd running with FRR AgentX data'
              if ('FRR_AGENTX_OK' in snmp_verify.stdout and 'SNMPD_RUNNING' in snmp_verify.stdout)
-             else 'PARTIAL - check the verification block above' }}
+             else 'FAILED - see the verification block above' }}
+
+    - name: Fail the play when SNMP is not actually working
+      # The whole point of this playbook is a working agent. Reporting
+      # "PARTIAL" and exiting 0 is what let the lab run for weeks with no
+      # snmpd, and only the dashboard noticed.
+      ansible.builtin.fail:
+        msg: >-
+          SNMP is not fully up on {{ inventory_hostname }}.
+          agentx={{ 'ok' if 'FRR_AGENTX_OK' in snmp_verify.stdout else 'missing' }},
+          snmpd={{ 'running' if 'SNMPD_RUNNING' in snmp_verify.stdout else 'down' }}.
+          Check: /etc/snmp/snmpd.conf, /etc/frr/daemons (agentx), and
+          /var/log/messages for snmpd.
+      when: >-
+        'FRR_AGENTX_OK' not in snmp_verify.stdout or
+        'SNMPD_RUNNING' not in snmp_verify.stdout

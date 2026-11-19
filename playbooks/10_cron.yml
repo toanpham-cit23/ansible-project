@@ -58,13 +58,19 @@
           export HOME=/root
           LOG={{ log_file }}
 
-          # keep the log small - last 300 lines if it grows over 1 MB
-          if [ -f "$LOG" ] && [ "$(wc -c "$LOG")" -gt 1024000 ]; then
-            tail -n 300 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+          # Keep the log small - last 300 lines once it passes 1 MB.
+          # `wc -c "$LOG"` prints "12345 /var/log/x.log", and `[ "12345 /var/log/x.log" -gt N ]`
+          # is not an integer test: it errored on every run and the log grew forever.
+          # The redirect form prints the count alone.
+          if [ -f "$LOG" ]; then
+            SIZE=$(wc -c < "$LOG" | tr -d ' ')
+            if [ "${SIZE:-0}" -gt 1024000 ]; then
+              tail -n 300 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+            fi
           fi
 
           echo "=== $(date) ===" >> "$LOG"
-          cd {{ project_dir }}
+          cd {{ project_dir }} || exit 1
           {{ ap_path.stdout | trim }} playbooks/06_backup.yml >> "$LOG" 2>&1
 
     - name: Add the cron job to crontab

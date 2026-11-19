@@ -9,7 +9,7 @@
 # FRR does not do NAT; this is a kernel nftables concern. Rules are generated
 # from the subnets table, written once, and reloaded atomically with nft -f.
 - name: NAT / PAT
-  hosts: network_devices
+  hosts: routers
   gather_facts: no
   vars:
     wan_iface: "{{ wan_interface | default('eth0') }}"
@@ -21,6 +21,14 @@
       changed_when: false
       register: nft_bin
       failed_when: nft_bin.rc != 0
+
+    # The copy below fails with "Destination directory does not exist" on a
+    # router where nftables was installed but never configured.
+    - name: Ensure the nftables include directory exists
+      ansible.builtin.file:
+        path: /etc/nftables.d
+        state: directory
+        mode: '0755'
 
     - name: Write the NAT table
       ansible.builtin.copy:
@@ -37,6 +45,9 @@
           }
       register: nat_conf
 
+    # Applied unconditionally: `nft -f` is idempotent (it replaces the table),
+    # and gating on nat_conf.changed meant that after a reboot -- when the file
+    # is unchanged but the kernel ruleset is empty -- NAT was never reloaded.
     - name: Load the ruleset
       ansible.builtin.shell: |
         set -e
@@ -44,9 +55,8 @@
         nft list ruleset | grep -q masquerade && echo NAT_OK || { echo NAT_FAIL; exit 1; }
       args:
         executable: /bin/sh
-      when: nat_conf.changed
       register: nat_load
-      changed_when: true
+      changed_when: "'NAT_OK' in nat_load.stdout"
 
     - name: Persist the ruleset across reboot
       ansible.builtin.copy:
@@ -64,6 +74,15 @@
       ansible.builtin.shell: nft list chain inet nat postrouting
       changed_when: false
       register: nat_verify
+
+    - name: Fail when the masquerade rule is not present
+      ansible.builtin.fail:
+        msg: >-
+          NAT is not active on {{ inventory_hostname }}: no masquerade rule in
+          inet nat postrouting. The file was written but not loaded (the load
+          task is skipped when the file is unchanged, e.g. right after a reboot
+          that flushed the ruleset).
+      when: "'masquerade' not in nat_verify.stdout"
 
     - name: Report
       ansible.builtin.debug:

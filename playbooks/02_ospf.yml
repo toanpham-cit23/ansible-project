@@ -20,7 +20,13 @@
           -c 'wr mem'
       register: ospf_result
       changed_when: "'%' not in ospf_result.stdout"
-      failed_when: "'Unknown command' in ospf_result.stdout or 'Incomplete command' in ospf_result.stdout"
+      # vtysh reports syntax errors on stdout and still exits 0, so the string
+      # tests are needed - but rc must be checked too, otherwise a missing
+      # vtysh (127) or a killed process also counted as success.
+      failed_when: >-
+        ospf_result.rc != 0 or
+        'Unknown command' in ospf_result.stdout or
+        'Incomplete command' in ospf_result.stdout
 
     - name: Show OSPF configuration output
       ansible.builtin.debug:

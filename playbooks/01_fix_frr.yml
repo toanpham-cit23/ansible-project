@@ -65,9 +65,23 @@
       changed_when: false
       failed_when: false
 
-    - name: Show daemin status
+    - name: Show daemon status
       ansible.builtin.debug:
         var: daemon_check.stdout_lines
+
+    # Every task above has failed_when: false on purpose - it has to try
+    # several service layouts before it knows which one applies. The cost is
+    # that a frr that never started also continues quietly: the loopback task
+    # is then skipped and the play ends green. This is the only place that can
+    # tell the difference, so it is the one that fails.
+    - name: Fail when FRR did not come up
+      ansible.builtin.fail:
+        msg: >-
+          FRR is not running on {{ inventory_hostname }} after the start
+          attempts. Daemon check said: {{ daemon_check.stdout_lines | join(' | ') }}.
+          Nothing in this play was applied; the rest of the pipeline would be
+          configuring a daemon that is not there.
+      when: "'ZEBRA_RUNNING' not in daemon_check.stdout or 'VTYSH_OK' not in daemon_check.stdout"
 
     - name: Configure loopback interface
       ansible.builtin.shell: |
@@ -90,6 +104,42 @@
     - name: Show loopback verification
       ansible.builtin.debug:
         var: lo_verify.stdout
+
+    # 00_hostname.yml runs before this play, so on a first deployment FRR was
+    # not up yet and it deferred the FRR hostname to here. 07_check.yml asserts
+    # `hostname <inventory_hostname>` appears in `show run`, so this has to
+    # actually happen or that check can never pass.
+    - name: Set the FRR hostname now that the daemons are running
+      ansible.builtin.shell: |
+        TERM=dumb vtysh -c 'conf t' -c 'hostname {{ inventory_hostname }}' \
+          -c 'end' -c 'write memory'
+      register: frr_hostname_fix
+      when: "'VTYSH_OK' in daemon_check.stdout"
+      changed_when: "'%' not in frr_hostname_fix.stdout"
+      failed_when: >-
+        frr_hostname_fix.rc != 0 or
+        'Unknown command' in frr_hostname_fix.stdout or
+        'Incomplete command' in frr_hostname_fix.stdout
+
+    - name: Verify the FRR hostname
+      ansible.builtin.shell: |
+        TERM=dumb vtysh -c 'show run' 2>/dev/null \
+          | grep -q '^hostname {{ inventory_hostname }}$' \
+          && echo FRR_HOSTNAME_OK || echo FRR_HOSTNAME_MISSING
+      register: frr_hostname_verify
+      when: "'VTYSH_OK' in daemon_check.stdout"
+      changed_when: false
+      failed_when: "false"
+
+    - name: Fail when the FRR hostname could not be set
+      ansible.builtin.fail:
+        msg: >-
+          FRR is running on {{ inventory_hostname }} but its hostname is not
+          {{ inventory_hostname }}. 07_check.yml would report this as a
+          configuration drift on every run.
+      when:
+        - "'VTYSH_OK' in daemon_check.stdout"
+        - "'FRR_HOSTNAME_OK' not in frr_hostname_verify.stdout"
 
     - name: Result
       ansible.builtin.debug:

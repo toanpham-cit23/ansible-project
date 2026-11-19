@@ -7,18 +7,23 @@
   tasks:
     - name: Check for available updates on controller
       ansible.builtin.shell: |
-        apk update -q >/dev/null 2>&1
-        UPDATES=$(apk version -l '<' 2>/dev/null | grep -c '^' || true)
-        if [ "$UPDATES" -gt 0 ]; then
-          echo "UPDATES_AVAILABLE: $UPDATES packages"
+        apk update -q >/dev/null 2>&1 || true
+        # Count the package lines, not every line: `apk version -l '<'` prints an
+        # "Installed: Available:" header and may print a trailing blank, so a
+        # plain `grep -c '^'` reported one or two packages even when the system
+        # was fully up to date.
+        PENDING=$(apk version -l '<' 2>/dev/null | sed '/^Installed/d; /^$/d' | wc -l | tr -d ' ')
+        PENDING=${PENDING:-0}
+        if [ "$PENDING" -gt 0 ]; then
+          echo "UPDATES_PENDING: $PENDING package(s)"
           apk version -l '<' 2>/dev/null
         else
-          echo "NO_UPDATES_AVAILABLE"
+          echo "UPDATES_NONE"
         fi
       delegate_to: localhost
       run_once: true
       register: controller_update_check
-      changed_when: "'UPDATES_AVAILABLE' in controller_update_check.stdout"
+      changed_when: "'UPDATES_PENDING' in controller_update_check.stdout"
       failed_when: false
 
     - name: Apply controller updates if available
@@ -26,20 +31,25 @@
         apk upgrade --no-progress 2>&1 | tail -5
       delegate_to: localhost
       run_once: true
-      when: "'UPDATES_AVAILABLE' in controller_update_check.stdout"
+      when: "'UPDATES_PENDING' in controller_update_check.stdout"
       register: controller_upgrade
       changed_when: true
       failed_when: false
 
+    # These two markers used to be NO_UPDATES_AVAILABLE / UPDATES_AVAILABLE.
+    # "UPDATES_AVAILABLE" is a substring of "NO_UPDATES_AVAILABLE", so the
+    # `'UPDATES_AVAILABLE' in stdout` test was true even with nothing pending
+    # and `apk upgrade` ran on every deployment. The markers are now distinct
+    # and neither is a prefix of the other.
     - name: Show controller update status (up to date)
       ansible.builtin.set_fact:
         update_status: UP_TO_DATE
-      when: "'NO_UPDATES' in controller_update_check.stdout"
+      when: "'UPDATES_NONE' in controller_update_check.stdout"
 
     - name: Show controller update status (updated)
       ansible.builtin.set_fact:
         update_status: UPDATED
-      when: "'NO_UPDATES' not in controller_update_check.stdout"
+      when: "'UPDATES_NONE' not in controller_update_check.stdout"
 
     - name: Show controller update status
       ansible.builtin.debug:
@@ -64,7 +74,7 @@
     - name: Check if router is configured
       ansible.builtin.shell: |
         SHOWRUN=$(TERM=dumb vtysh -c 'show run' 2>&1)
-        echo "$SHOWRUN" | grep -q "hostname {{ inventory_hostname }}" && echo "CFG_OK: hostname" || echo "CFG_MISSING: hostname (00_hostname.yml)"
+        echo "$SHOWRUN" | grep -q "hostname {{ inventory_hostname }}" && echo "CFG_OK: hostname" || echo "CFG_MISSING: hostname (01_fix_frr.yml sets it)"
         echo "$SHOWRUN" | grep -q "interface lo" && echo "CFG_OK: loopback" || echo "CFG_MISSING: loopback (01_fix_frr.yml)"
         echo "$SHOWRUN" | grep -q "router ospf" && echo "CFG_OK: ospf" || echo "CFG_MISSING: ospf (02_ospf.yml)"
         echo "$SHOWRUN" | grep -q "access-list" && echo "CFG_OK: acl" || echo "CFG_MISSING: acl (05_acl.yml)"
@@ -99,7 +109,7 @@
           && echo "CFG_OK: frr agentx" || echo "CFG_MISSING: frr agentx (04_snmp.yml)"
 
         ps | grep '[z]abbix_agentd' > /dev/null \
-          && echo "SERVICE_OK: zabbix-agent" || echo "SERVICE_DOWN: zabbix-agent"
+          && echo "SERVICE_OK: zabbix-agent" || echo "OPTIONAL_ABSENT: zabbix-agent (removed 2026-10-28)"
       register: extended_check
       changed_when: false
       failed_when: false

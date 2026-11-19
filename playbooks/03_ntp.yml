@@ -37,6 +37,10 @@
         path: /etc/chrony/chrony.conf
         line: "server 192.168.23.10 iburst"
         state: present
+        # The file is absent on a router that has never had chrony configured;
+        # without this the task fails with "Destination does not exist".
+        create: yes
+        mode: '0644'
       register: ntp_config
     - name: Install tzdata from local file
       ansible.builtin.shell: apk add --allow-untrusted --no-network /tmp/ntp-pkgs/tzdata.apk

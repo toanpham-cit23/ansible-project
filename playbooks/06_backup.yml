@@ -64,11 +64,29 @@
         if [ ! -s "$CURRENT" ]; then
           TERM=dumb vtysh -c 'show run' > "$CURRENT" 2>&1
         fi
-        if [ -s "$CURRENT" ] && [ -s /etc/frr/frr.conf ]; then
+        # /etc/frr/frr.conf is authoritative and is what FRR itself persists, so
+        # it wins when it exists. Note this replaces the vtysh output, it is not
+        # an addition to it.
+        if [ -s /etc/frr/frr.conf ]; then
           cp /etc/frr/frr.conf "$CURRENT"
         fi
         if [ ! -s "$CURRENT" ]; then
           echo "BACKUP_FAILED"
+          exit 1
+        fi
+        # -s only proves the file is non-empty. When vtysh fails it writes its
+        # error to the same redirected stream, so "Can't connect to daemon" was
+        # a valid 30-byte config file: it got stored as a backup, and
+        # 14_restore.yml restores the newest backup it finds. Anything that is
+        # not a real FRR config is rejected here instead.
+        if grep -qiE "can't connect|cannot connect|vtysh: error|% |unknown command|no such file" "$CURRENT"; then
+          echo "BACKUP_FAILED: captured text is not a config:"
+          head -3 "$CURRENT"
+          exit 1
+        fi
+        if ! grep -q "^version \|^frr version \|^hostname " "$CURRENT"; then
+          echo "BACKUP_FAILED: no FRR header in captured text:"
+          head -3 "$CURRENT"
           exit 1
         fi
         NEWEST=$(ls {{ backup_dir }}/*.conf 2>/dev/null | sort | tail -1)
@@ -82,8 +100,9 @@
         fi
         rm -f "$CURRENT"
       register: backup_result
-      failed_when: backup_result.rc != 0 or 'BACKUP_FAILED' in backup_result.stdout
+      # No `|| true` here: this is the task whose output the restore path trusts.
       changed_when: "'BACKUP_CREATED' in backup_result.stdout"
+      failed_when: backup_result.rc != 0 or 'BACKUP_FAILED' in backup_result.stdout
 
     - name: Result
       ansible.builtin.debug:

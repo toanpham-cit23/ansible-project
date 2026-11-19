@@ -1,8 +1,78 @@
 ---
+# Set the router's name in both places that matter.
+#
+# Two hostnames exist on these boxes and they are independent:
+#   * the Linux hostname  (hostname module, /etc/hostname)
+#   * the FRR hostname    (vtysh `hostname <name>`, stored in /etc/frr/frr.conf)
+#
+# Setting only the Linux one left `show run` without a `hostname` line, so
+# 07_check.yml reported "CFG_MISSING: hostname (00_hostname.yml)" on every run
+# even though this playbook had succeeded, and 14_restore.yml's verification
+# failed for the same reason. Both are set here.
+#
+# FRR is configured after 01_fix_frr.yml in a clean run order, but vtysh is
+# probed first so running this play on its own does not fail.
 - name: Set Router Hostname
   hosts: routers
   gather_facts: no
   tasks:
-    - name: Set hostname
+    - name: Set Linux hostname
       ansible.builtin.hostname:
         name: "{{ inventory_hostname }}"
+
+    - name: Detect vtysh
+      ansible.builtin.shell: command -v vtysh || echo VTYSH_MISSING
+      register: vtysh_present
+      changed_when: false
+      failed_when: false
+
+    - name: Check whether FRR is already running
+      ansible.builtin.shell: |
+        rc-service frr status >/dev/null 2>&1 && echo FRR_RUNNING || echo FRR_DOWN
+      register: frr_state
+      when: "'VTYSH_MISSING' not in vtysh_present.stdout"
+      changed_when: false
+      failed_when: false
+
+    # 00_hostname runs before 01_fix_frr, so on a first deployment FRR is not
+    # up yet and vtysh cannot write. Skipping (rather than failing, or writing
+    # into a dead daemon) is correct here; 01_fix_frr's final task sets and
+    # verifies the same hostname once the daemons are actually running.
+    - name: Set the FRR hostname
+      ansible.builtin.shell: |
+        TERM=dumb vtysh \
+          -c 'conf t' \
+          -c 'hostname {{ inventory_hostname }}' \
+          -c 'end' \
+          -c 'write memory'
+      register: frr_hostname
+      when:
+        - "'VTYSH_MISSING' not in vtysh_present.stdout"
+        - "'FRR_RUNNING' in frr_state.stdout"
+      changed_when: "'%' not in frr_hostname.stdout"
+      failed_when: >-
+        frr_hostname.rc != 0 or
+        'Unknown command' in frr_hostname.stdout or
+        'Incomplete command' in frr_hostname.stdout
+
+    - name: Verify the FRR hostname landed
+      ansible.builtin.shell: |
+        TERM=dumb vtysh -c 'show run' 2>/dev/null \
+          | grep -q '^hostname {{ inventory_hostname }}$' \
+          && echo FRR_HOSTNAME_OK || echo FRR_HOSTNAME_MISSING
+      register: hostname_verify
+      when: "'VTYSH_MISSING' not in vtysh_present.stdout"
+      changed_when: false
+      failed_when: false
+
+    - name: Decide the FRR hostname verdict
+      ansible.builtin.set_fact:
+        frr_hostname_verdict: >-
+          {{ 'set' if 'FRR_HOSTNAME_OK' in (hostname_verify.stdout | default(''))
+             else ('deferred to 01_fix_frr.yml (FRR not running yet)'
+                   if 'FRR_RUNNING' not in (frr_state.stdout | default(''))
+                   else 'NOT set - vtysh is present but could not write the hostname') }}
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: Linux hostname set; FRR hostname {{ frr_hostname_verdict }}"
