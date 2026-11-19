@@ -5,6 +5,26 @@ the workstation; all commands are sent over an SSH session. The dashboard API
 has **no shell and no SSH client** — it only reads the JSON status files these
 scripts write and leaves request markers in `/data/ops/*.request`.
 
+## Addresses at a glance
+
+The concrete addresses for this install. Anything that needs to be typed into
+a browser, a router or an `/etc/hosts` file is here, so it does not have to be
+re-derived from the scripts.
+
+| What | Value | Notes |
+|---|---|---|
+| Lab LAN (controller, `eth0`) | `192.168.23.10` | static; the `:8443` TLS listener lives here |
+| Routers | `192.168.23.11` – `.13` | r1, r2, r3 management addresses |
+| Public IP | `118.69.10.174` | the NAT gateway; changes with the ISP |
+| Stable name | `ansiblelabcsn340.duckdns.org` | A record already points at the public IP |
+| HTTPS origin | `https://ansiblelabcsn340.duckdns.org:8443` | LE cert valid to 2026-12-06 |
+| Ephemeral tunnel | `*.trycloudflare.com` | random per restart — read the live value, never a saved one |
+
+The stable name resolving correctly and the site being reachable from outside
+are two different things. **DNS is fine here; the inbound port is not
+forwarded**, so an external browser gets `ERR_CONNECTION_REFUSED` on `:8443`,
+not a name error. See "Port forwarding" below.
+
 ## Install
 
 ```sh
@@ -34,7 +54,7 @@ Three addresses are involved, and only one is public:
 |---|---|---|
 | `eth0` | `192.168.23.10/24` | **static**, defined in `/etc/network/interfaces`. The lab LAN. Does not change with the upstream network. |
 | `eth1` | DHCP (`192.168.220.x` here) | VMware NAT side. Can change when the host/network changes. |
-| public | `<public-ip>` here | the NAT gateway. Changes with the ISP/network. |
+| public | `118.69.10.174` here | the NAT gateway. Changes with the ISP/network. |
 
 **Fully automatic, no action needed:**
 
@@ -42,7 +62,8 @@ Three addresses are involved, and only one is public:
 - The certificate is bound to the *name*, not the IP — an IP change never
   invalidates or requires reissuing it. `acme.sh --cron` renews daily when due.
 - The lab's own DNS override for the DuckDNS name follows `eth0`'s actual
-  address, so `https://<domain>:8443` keeps working inside the lab.
+  address, so `https://ansiblelabcsn340.duckdns.org:8443` keeps working inside
+  the lab.
 
 **Not automatic — the only manual part:**
 
@@ -74,7 +95,7 @@ cat /root/lab/db/ops/cloudflared.json   # current URL + health
 - Runs an OpenRC service, enabled at boot; `tunnel-status.sh` publishes the
   current URL to `/data/ops/cloudflared.json` every minute and the dashboard
   shows it in the status bar and the *Trust & access* widget.
-- The origin is `https://<duckdns-name>:8443`, with that name pinned to
+- The origin is `https://ansiblelabcsn340.duckdns.org:8443`, with that name pinned to
   `127.0.0.1` in the controller's `/etc/hosts`. cloudflared therefore verifies
   the real Let's Encrypt certificate, and the API still sees a TLS request —
   so `Secure` cookies and HSTS survive the tunnel instead of being downgraded
@@ -82,6 +103,17 @@ cat /root/lab/db/ops/cloudflared.json   # current URL + health
 - This is a **Quick Tunnel**: the `*.trycloudflare.com` URL is random and
   changes whenever the service restarts. That is why the current URL is
   surfaced in the dashboard rather than hardcoded anywhere.
+
+  **A saved Quick Tunnel URL does not survive a restart.** Cloudflare reclaims
+  the name, so an old bookmark fails with `ERR_NAME_NOT_RESOLVED` — DNS says
+  the name does not exist — not `ERR_CONNECTION_REFUSED`, which would mean the
+  name resolves but nothing is listening. If a colleague's link stops working
+  and the browser reports `DNS_PROBE_FINISHED_NXDOMAIN` or
+  `ERR_NAME_NOT_RESOLVED`, the tunnel moved; read the current URL from
+  `/root/lab/db/ops/cloudflared.json` or the dashboard, and do not "fix" it by
+  editing DNS. The stable name for this lab is
+  `ansiblelabcsn340.duckdns.org`, which resolves to `118.69.10.174` and is
+  unaffected by tunnel restarts.
 
 For a **stable hostname** on your own domain, replace it with a named tunnel:
 `cloudflared tunnel login` (browser OAuth), then `cloudflared tunnel create`,
@@ -96,10 +128,10 @@ certificate chain, and `POST /api/login` returned
 
 ### Why the browser says "refused to connect" from the workstation
 
-The DuckDNS name resolves to the **public** IP `<public-ip>`. There is no
+The DuckDNS name resolves to the **public** IP `118.69.10.174`. There is no
 port forward there, so TCP :8443 is refused — `ERR_CONNECTION_REFUSED`. The
 certificate and the :8443 listener are both fine; a TLS handshake directly to
-`192.168.23.10:8443` with SNI `<subdomain>.duckdns.org` succeeds with
+`192.168.23.10:8443` with SNI `ansiblelabcsn340.duckdns.org` succeeds with
 TLS 1.3 and a matching CN.
 
 The local DNS override lives in the **lab's own DNS responder** (UDP 53 on the
@@ -111,10 +143,10 @@ For LAN-only use, add one line to the workstation's
 `C:\Windows\System32\drivers\etc\hosts` (needs an elevated editor):
 
 ```
-192.168.23.10 <subdomain>.duckdns.org
+192.168.23.10 ansiblelabcsn340.duckdns.org
 ```
 
-Then `https://<subdomain>.duckdns.org:8443` opens with the trusted
+Then `https://ansiblelabcsn340.duckdns.org:8443` opens with the trusted
 certificate and no warning. `eth0` is static, so this address is stable; `eth1`
 is DHCP and should not be used here. Remove the line once real port forwarding
 is in place, otherwise that PC will always resolve the name to the private
@@ -123,19 +155,28 @@ address even from another network.
 ## Trusted HTTPS — one command once the credentials exist
 
 `acme-issue.sh` uses **DNS-01** through DuckDNS, so it needs no inbound port.
-Inbound 80/443/8080/8443 on the public IP `<public-ip>` were all tested and
+Inbound 80/443/8080/8443 on the public IP `118.69.10.174` were all tested and
 return no response, so HTTP-01 is impossible here and DNS-01 is the only path.
+
+**This lab is already configured** with `ansiblelabcsn340.duckdns.org`, whose
+Let's Encrypt certificate is valid through 2026-12-06 and renews on its own.
+The steps below are what was run once, and are kept for a rebuild — on an
+existing install there is nothing to do.
 
 **You need a free DuckDNS account.** Sign in at <https://www.duckdns.org>,
 create a subdomain, and copy the token from the dashboard. Then, over SSH:
 
 ```sh
 # env vars are preferred - arguments would land in shell history and `ps`
-DUCKDNS_DOMAIN="your-subdomain" \
-DUCKDNS_TOKEN="your-token" \
-ACME_EMAIL="you@example.com" \
+DUCKDNS_DOMAIN="ansiblelabcsn340" \
+DUCKDNS_TOKEN="<token-from-duckdns.org>" \
+ACME_EMAIL="<your-email>" \
   /root/lab/ops/duckdns-setup.sh
 ```
+
+The token is not stored in this repo, and neither is the ACME email: both are
+credentials, and `files/ops/duckdns.env` ships empty on purpose. The real file
+lives on the controller at `/root/lab/ops/duckdns.env` (mode 0600).
 
 The helper:
 
@@ -158,8 +199,8 @@ which restarts the API so the new certificate is picked up.
 
 **Still required outside SSH:** forwarding public 443 to the controller for
 external clients. That is a hypervisor/router change, not something this repo
-can do. Inside the lab, `https://<domain>.duckdns.org:8443` works via the local
-DNS override.
+can do. Inside the lab, `https://ansiblelabcsn340.duckdns.org:8443` works via
+the local DNS override.
 
 ## Firewall
 
