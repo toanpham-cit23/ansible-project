@@ -605,3 +605,95 @@ the old path remains available for rollback and for the parity test.
 
 On the Controller, remember §8.2: pass `--db /root/lab/db/net.db` explicitly or
 the audit writes to a database the dashboard never opens.
+
+---
+
+## 12. Re-check of 2026-11-19
+
+Six items were re-checked at the owner's request. Everything in this section
+is in English by request.
+
+### 12.1 Router health — still unauditable live
+
+All three routers answer on their management IPs (`192.168.23.11`, `.12`,
+`.13`), and port 22 offers `publickey` and `keyboard-interactive`. They still
+reject the stored lab password, keyboard-interactive with that password, and
+every key available on this workstation (`Permission denied`). The controller
+(`.10`) offers password auth too, but none of the recorded passwords works.
+
+**No new live verdict can be produced.** The last known compliance snapshot
+remains the one described in §7, and it is historical, not current. The
+`.1` address that answers on the segment is `DESKTOP-J8B9TQE` (the workstation
+side of the virtual network), not a lab gateway.
+
+### 12.2 Compliance as a standalone dashboard item
+
+No structural change was needed: compliance was already a top-level nav item
+(`app.html:99`), its own route (`views.compliance`), and its own API endpoint
+(`GET /api/compliance`). Two defects in that surface were fixed:
+
+- The empty state was still Vietnamese. It now says, in English, to run the
+  audit with `--db /root/lab/db/net.db` — the exact trap from §8.2.
+- A `nav-sep` "Audit" divider in the sidebar and its CSS make compliance a
+  distinct section instead of one more link among the monitoring views. The
+  divider is hidden when the sidebar is collapsed.
+
+### 12.3 Switch — design only, no device
+
+There is no managed switch anywhere in this lab. `files/lab/vlans.yml:13-16`
+says so explicitly: the three switches are drawn, not cabled. They exist as
+labels in `LAB.switches` (`app.js:825`), as `switch: s1|s2|s3` on the eight
+design hosts, and in `host_design`, but there is no switch IP, no SSH
+management, no switch in `hosts.ini.example`, and no playbook that configures
+one. `playbooks/16_vlan.yml` declares `hosts: network_devices`, which the
+inventory script would populate with a `switches` group — but that group is
+empty in this lab.
+
+**Conclusion:** nothing to reconfigure or roll back on a switch. The VLAN
+design is a planning model until real switches exist.
+
+### 12.4 Rollback guard — 180 s verified offline
+
+`files/ops/fw-guard.sh` already implements the 180-second window for the host
+firewall (`GUARD_SECONDS=180`, deadline written by `apply`, cron tick every
+minute, rollback on expiry unless `confirm`). It was never tested without a
+controller, so `files/ops/test_fw_guard.py` was added: it runs a copy of the
+script with stubbed `iptables`, `rc-service` and `status.py`.
+
+Result: **6/6 checks passed** — apply arms ~now+180 and attaches the chain;
+an early tick does nothing; expiry rolls back and clears the deadline;
+`confirm` clears it; a confirmed chain is reinstalled without re-arming; manual
+rollback removes the chain and the confirmation. `sh -n` clean. This verifies
+the firewall guard only; there is no equivalent guard for router config
+changes, and none was added without live SSH access to test it.
+
+### 12.5 VLAN — consistent, and the seed path was executed
+
+The three host lists agree exactly: eight MACs in `files/lab/vlans.yml`,
+`files/sim/simctl.py` and `LAB.hosts` in `app.js`, with no missing or extra
+entries. `files/lab/seed_design.py` was run against a scratch database created
+from the **real** `files/dashboard/db/schema.sql`, with `design.json` rendered
+from the real YAML:
+
+```
+seed exit: 0
+9 VLANs, 8 hosts, 0 existing lease(s) relabelled
+counts: vlans=9, subnets=9, host_design=8
+balance: r1=2, r2=3, r3=3
+```
+
+That matches the stated design. One caveat remains unchanged from the YAML
+comment: the tagged frames cannot reach these VLANs while the switches are
+only drawn. `playbooks/16_vlan.yml` is still deliberately not imported into
+`master.yml` because it needs `iproute2`, which the routers lack.
+
+### 12.6 What changed on disk
+
+| File | Change |
+| --- | --- |
+| `compliance/PORT-REPORT.md` | This section |
+| `files/dashboard/docker/api/static/app.html` | "Audit" nav separator |
+| `files/dashboard/docker/api/static/css/app.css` | `.nav-sep` styling |
+| `files/dashboard/docker/api/static/js/app.js` | English empty state with the correct `--db` command |
+| `files/ops/test_fw_guard.py` | New offline 180 s guard test |
+| `files/ops/README.md` | Guard timing and test instructions |

@@ -22,7 +22,7 @@ initial snapshot. Re-running is safe.
 | every 5 min | `network-sync.sh` | detect public/LAN/upstream addresses, refresh the A record (calls `duckdns-update.sh`) and the local DNS override |
 | every minute | `backup-worker.sh` | consume queued snapshot / retention requests |
 | 1 Jan & 1 Jul, 03:00 UTC | `retention.sh --apply` | semi-annual clearance |
-| every minute | `fw-guard.sh guard` | enforce the firewall rollback deadline |
+| every minute | `fw-guard.sh guard` | enforce the firewall rollback deadline (180 s) |
 | 02:17 daily | `acme.sh --cron` | renew certificates; runs the reload command when one is renewed |
 | on `eth1` link-up | `/etc/network/if-up.d/duckdns` | sync immediately on a new network instead of waiting for the next tick |
 
@@ -189,6 +189,20 @@ happened once and is why the env file is handled separately.
 Scope: `INPUT` protects host services. Docker-published ports (8080/8443) are
 DNATed through `FORWARD`/`DOCKER` and are deliberately not restricted here —
 blocking them would also block the public HTTPS endpoint.
+
+**Offline verification (2026-11-19):** `test_fw_guard.py` runs a copy of
+`fw-guard.sh` against stubbed `iptables`, `rc-service` and `status.py`, so the
+deadline logic can be checked without a controller:
+
+```sh
+python3 files/ops/test_fw_guard.py     # 6/6 checks passed
+```
+
+It covers: `apply` arms a deadline of ~now+180 s and attaches the chain;
+an early `guard` tick does nothing; an expired tick rolls back and clears the
+deadline; `confirm` clears it; a confirmed chain is reinstalled without
+re-arming the deadline; and manual `rollback` clears both the chain and the
+confirmation flag.
 
 ## Retention
 

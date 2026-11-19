@@ -2694,7 +2694,7 @@ const views = {
       <div class="panel"><div class="p-title">Compliant</div><div class="p-big">${x.devices_compliant}</div></div>
       <div class="panel"><div class="p-title">Non-compliant</div><div class="p-big">${x.devices_noncompliant}</div></div>
       <div class="panel"><div class="p-title">Errors / no config</div><div class="p-big">${x.devices_error}</div></div></div>
-      <p class="muted" style="font-size:12px">Last audit: ${esc(x.checked_at)} · Run #${x.id}</p>` : '<div class="panel">Chưa có kết quả. Hãy chạy lệnh compliance trên Controller trước.</div>';
+      <p class="muted" style="font-size:12px">Last audit: ${esc(x.checked_at)} · Run #${x.id}</p>` : '<div class="panel">No audit results yet. Run the compliance tool on the Controller with <span class="mono">--db /root/lab/db/net.db</span> so the results are written to the database this dashboard actually reads.</div>';
     const rows=(data.findings||[]).map(f=>`<tr><td><b>${esc(f.hostname)}</b></td><td>${pill(f.status)}</td><td class="mono">${esc(f.rule)}</td><td class="muted">${esc(f.detail)}</td></tr>`).join('');
     const hist=(data.history||[]).map(h=>`<tr><td>${esc(h.checked_at)}</td><td>${pill(h.status)}</td><td>${h.devices_compliant}/${h.devices_total}</td><td>${h.devices_noncompliant}</td><td>${h.devices_error}</td></tr>`).join('');
     $('#view').innerHTML = section('compliance-summary','Configuration compliance', summary, true) +

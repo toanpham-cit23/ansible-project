@@ -49,6 +49,15 @@ body {
 }
 .side nav a:hover, .logout:hover { background: var(--panel2); }
 .side nav a.active { background: var(--panel2); color: var(--accent); }
+/* Compliance is an audit section, not a live-monitoring link. Keep it visually
+   separate so the two kinds of information are not confused. */
+.side nav .nav-sep {
+  margin: 12px 10px 5px; padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--muted); white-space: nowrap;
+}
+.side.collapsed nav .nav-sep { display: none; }
 .ico { width: 18px; text-align: center; color: var(--muted); font-size: 14px; }
 .logout { color: var(--err); margin: 9px; }
 
