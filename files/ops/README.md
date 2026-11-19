@@ -204,6 +204,25 @@ deadline; `confirm` clears it; a confirmed chain is reinstalled without
 re-arming the deadline; and manual `rollback` clears both the chain and the
 confirmation flag.
 
+**Failure demos (2026-11-19):** `demo_rollback.py` answers a different
+question from the test above — not "is the timer arithmetic right" but "when
+something breaks, what does the guard actually save me from". It replays the
+stub's iptables calls into a rule list and walks a simulated SSH SYN from the
+controller through it, so "SSH lost" means the rule order really would deny it.
+
+```sh
+python3 files/ops/demo_rollback.py     # 3/3 scenarios behaved as designed
+```
+
+| Demo | What breaks | What the guard does |
+| --- | --- | --- |
+| 1 | Operator inserts a `DROP` above the SSH rule and never confirms | After 180 s the guard detaches the chain; SSH is reachable again with nobody logged in |
+| 2 | `iptables` rejects a rule halfway through the set | `add()` rolls the whole chain back immediately, so no half-applied firewall is left |
+| 3 | Docker restarts the network and a *confirmed* chain vanishes | The guard reinstalls it silently, without starting a new 180 s countdown |
+
+Demo 1 is the one that matters: the host is genuinely unreachable at the point
+the guard fires, which is exactly the case a human cannot fix from outside.
+
 ## Retention
 
 `retention.py` prunes time-series tables older than 180 days, expired sessions,

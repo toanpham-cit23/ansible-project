@@ -1,7 +1,7 @@
 const state = { range: 'live', devices: [], me: null, timer: null, term: null, zoom: 1,
                 logPage: 1, logLevel: 'all', logQuery: '', logFilterOpen: false,
                 leaseQuery: '', leaseOnline: false, analysisHours: 24, shiftEdit: null,
-                topoFocus: null, topoIssues: {} };
+                topoFocus: null, topoIssues: {}, cmpHost: null };
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -192,6 +192,18 @@ async function onClick(e) {
 
   const b = e.target.closest('button');
   if (!b) return;
+
+  // Compliance device tree: switch the right-hand panel without a re-route,
+  // so the audit summary above it does not flicker.
+  if (b.dataset.cmpHost) {
+    const host = b.dataset.cmpHost;
+    state.cmpHost = host;
+    document.querySelectorAll('.cmp-node').forEach((n) => {
+      n.classList.toggle('on', n.dataset.cmpHost === host);
+    });
+    renderComplianceDevice(host);
+    return;
+  }
 
   if (b.dataset.logtab) {
     state.logTab = b.dataset.logtab;
@@ -2699,25 +2711,81 @@ const views = {
     $('#view').innerHTML = section('setup', 'Devices, discovery and DNS', body + dnsPanel, true);
   },
 
-  // ------------------------------------------------------- gap analysis
-  // A separate section, not a widget: the audit is a written record of what
-  // the dashboard was missing and which of those gaps were actually closed.
+  // ---------------------------------------------------- configuration compliance
+  // Laid out like a device-centric compliance console: a device tree on the
+  // left, one device's evidence on the right. The rule list alone is not an
+  // answer, so each device also shows the difference between the config that
+  // was collected and the one collected before it - that diff is what reveals
+  // a change someone made by hand on the router.
   async compliance() {
     const data = await api.get('/api/compliance');
     const x = data.latest;
-    const pill = (v) => `<span class="pill ${v === 'COMPLIANT' ? 'up' : (v === 'NON_COMPLIANT' ? 'err' : 'down')}">${esc(v || 'NO DATA')}</span>`;
-    const summary = x ? `<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px">
-      <div class="panel"><div class="p-title">Overall status</div><div style="margin-top:8px">${pill(x.status)}</div></div>
+
+    if (!x) {
+      $('#view').innerHTML = `<div class="panel">
+        <div class="p-title" style="text-align:left;font-size:14px;color:var(--ink)">No audit results yet</div>
+        <p class="muted" style="margin-top:8px;font-size:13px">Run the compliance tool on the Controller so the results land in the database this dashboard reads:</p>
+        <pre class="mono" style="margin-top:8px;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:3px;overflow:auto">cd /root/lab/compliance &amp;&amp; ./run.sh --db /root/lab/db/net.db</pre>
+        <p class="muted" style="margin-top:8px;font-size:12.5px">The <span class="mono">--db</span> path matters: the tool defaults to a database inside the repo, which the dashboard never opens.</p>
+      </div>`;
+      return;
+    }
+
+    // Group the flat findings into one row per device.
+    const byHost = new Map();
+    for (const f of (data.findings || [])) {
+      if (!byHost.has(f.hostname)) byHost.set(f.hostname, { host: f.hostname, status: f.status, rules: [] });
+      byHost.get(f.hostname).rules.push(f);
+    }
+    const devices = [...byHost.values()].sort((a, b) => a.host.localeCompare(b.host));
+    const sel = state.cmpHost && byHost.has(state.cmpHost)
+      ? state.cmpHost
+      : (devices.find((d) => d.status !== 'COMPLIANT') || devices[0] || {}).host;
+
+    const statusPill = (v) => {
+      const cls = v === 'COMPLIANT' ? 'up' : (v === 'NON_COMPLIANT' ? 'down' : '');
+      const label = v === 'COMPLIANT' ? 'Compliant' : (v === 'NON_COMPLIANT' ? 'Non-compliant' : 'Unreachable');
+      return `<span class="pill ${cls}">${esc(label)}</span>`;
+    };
+
+    const tree = devices.map((d) => {
+      const bad = d.rules.filter((r) => r.status !== 'COMPLIANT').length;
+      const active = d.host === sel;
+      return `<button class="cmp-node${active ? ' on' : ''}" data-cmp-host="${esc(d.host)}">
+        <span class="cmp-dot ${d.status === 'COMPLIANT' ? 'ok' : (d.status === 'NON_COMPLIANT' ? 'bad' : 'unk')}"></span>
+        <span class="cmp-name">${esc(d.host)}</span>
+        <span class="cmp-badge">${d.status === 'COMPLIANT' ? 'OK' : (bad || 1)}</span>
+      </button>`;
+    }).join('');
+
+    const summary = `<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:9px">
+      <div class="panel"><div class="p-title">Overall</div><div style="margin-top:8px;text-align:center">${statusPill(x.status)}</div></div>
       <div class="panel"><div class="p-title">Compliant</div><div class="p-big">${x.devices_compliant}</div></div>
       <div class="panel"><div class="p-title">Non-compliant</div><div class="p-big">${x.devices_noncompliant}</div></div>
-      <div class="panel"><div class="p-title">Errors / no config</div><div class="p-big">${x.devices_error}</div></div></div>
-      <p class="muted" style="font-size:12px">Last audit: ${esc(x.checked_at)} · Run #${x.id}</p>` : '<div class="panel">No audit results yet. Run the compliance tool on the Controller with <span class="mono">--db /root/lab/db/net.db</span> so the results are written to the database this dashboard actually reads.</div>';
-    const rows=(data.findings||[]).map(f=>`<tr><td><b>${esc(f.hostname)}</b></td><td>${pill(f.status)}</td><td class="mono">${esc(f.rule)}</td><td class="muted">${esc(f.detail)}</td></tr>`).join('');
-    const hist=(data.history||[]).map(h=>`<tr><td>${esc(h.checked_at)}</td><td>${pill(h.status)}</td><td>${h.devices_compliant}/${h.devices_total}</td><td>${h.devices_noncompliant}</td><td>${h.devices_error}</td></tr>`).join('');
-    $('#view').innerHTML = section('compliance-summary','Configuration compliance', summary, true) +
-      section('compliance-findings','Latest rule results', `<div class="panel"><table><thead><tr><th>Router</th><th>Status</th><th>Rule</th><th>Detail</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">No findings yet</td></tr>'}</tbody></table></div>`, true) +
-      section('compliance-history','Audit history', `<div class="panel"><table><thead><tr><th>Checked at</th><th>Status</th><th>Compliant</th><th>Non-compliant</th><th>Errors</th></tr></thead><tbody>${hist || '<tr><td colspan="5" class="muted">No history</td></tr>'}</tbody></table></div>`, true) +
-      `<p class="muted" style="font-size:12px;margin-top:10px">Read-only audit. Dashboard does not change router configuration.</p>`;
+      <div class="panel"><div class="p-title">Unreachable</div><div class="p-big">${x.devices_error}</div></div></div>
+      <p class="muted" style="font-size:12px;margin-top:7px">Last audit ${esc(x.checked_at)} · run #${x.id} · only the declared rules are checked, and the dashboard never writes to a router.</p>`;
+
+    const hist = (data.history || []).map((h) => `<tr>
+      <td>${esc(h.checked_at)}</td>
+      <td>${statusPill(h.status)}</td>
+      <td>${h.devices_compliant}/${h.devices_total}</td>
+      <td>${h.devices_noncompliant}</td>
+      <td>${h.devices_error}</td></tr>`).join('');
+
+    $('#view').innerHTML = section('compliance-summary', 'Configuration compliance', summary, true) +
+      `<div class="cmp-wrap">
+        <aside class="cmp-tree">
+          <div class="cmp-tree-h">Devices <span class="muted">${devices.length}</span></div>
+          ${tree || '<p class="muted" style="padding:10px;font-size:12.5px">No devices audited.</p>'}
+        </aside>
+        <div class="cmp-main" id="cmp-main"><p class="muted" style="padding:14px">Loading ${esc(sel || '')}…</p></div>
+      </div>` +
+      section('compliance-history', 'Audit history', `<div class="panel"><table>
+        <thead><tr><th>Checked at</th><th>Status</th><th>Compliant</th><th>Non-compliant</th><th>Unreachable</th></tr></thead>
+        <tbody>${hist || '<tr><td colspan="5" class="muted">No history</td></tr>'}</tbody></table></div>`, false);
+
+    state.cmpHost = sel;
+    if (sel) await renderComplianceDevice(sel);
   },
 
   async gapanalysis() {
@@ -2862,6 +2930,90 @@ async function renderStatusbar() {
         rel="noopener noreferrer" title="Tham gia nhóm Telegram của team">
         Join Telegram group</a>`,
   ].join('');
+}
+
+// ---------------------------------------------------- compliance device panel
+// One device's evidence: the verdict and the result of each declared rule,
+// with the previous result beside any rule whose outcome changed.
+//
+// Scope: this module only answers "are the rules declared in
+// desired_state.yml present in the running-config?". It does not judge
+// configuration outside that list, and it never writes to a router. A rule
+// that starts or stops matching is therefore the only kind of change shown.
+async function renderComplianceDevice(host) {
+  const box = $('#cmp-main');
+  if (!box) return;
+  let d;
+  try {
+    d = await api.get('/api/compliance/device?host=' + encodeURIComponent(host));
+  } catch (e) {
+    box.innerHTML = `<p class="err" style="padding:14px">${esc(e.message)}</p>`;
+    return;
+  }
+  if (!d.found) {
+    box.innerHTML = `<div class="panel" style="padding:14px">
+      <b style="font-size:13px">Not in the latest audit</b>
+      <p class="muted" style="font-size:12.5px;margin-top:5px">${esc(host)} has no rule results in the most recent run. Either it was removed from the rule file, or the audit has not run since it was added.</p>
+    </div>`;
+    return;
+  }
+
+  const pill = (v) => {
+    const cls = v === 'COMPLIANT' ? 'up' : (v === 'NON_COMPLIANT' ? 'down' : '');
+    const label = v === 'COMPLIANT' ? 'Compliant' : (v === 'NON_COMPLIANT' ? 'Drift' : 'Unreachable');
+    return `<span class="pill ${cls}">${esc(label)}</span>`;
+  };
+
+  const unreachable = d.status === 'ERROR';
+  const rules = (d.rules || []).map((r) => {
+    const ok = r.status === 'COMPLIANT';
+    const was = r.changed ? (r.before === 'COMPLIANT' ? 'was compliant' : 'was failing') : '';
+    return `<li class="cmp-rule ${ok ? 'ok' : 'bad'}">
+      <span class="cmp-rule-ic">${ok ? '✓' : '✕'}</span>
+      <div style="min-width:0">
+        <div class="mono" style="font-size:12px;word-break:break-all">${esc(r.rule)}</div>
+        <div class="muted" style="font-size:12px;margin-top:2px">
+          ${ok ? 'Present in the running-config.' : esc(r.detail)}
+          ${r.changed ? `<span class="cmp-chg">changed · ${esc(was)}</span>` : ''}
+        </div>
+      </div></li>`;
+  }).join('');
+
+  let note;
+  if (unreachable) {
+    note = `<div class="panel" style="padding:13px 14px;margin-top:9px">
+      <b style="font-size:13px">Could not be checked</b>
+      <p class="muted" style="font-size:12.5px;margin-top:5px">The collector could not read this device, so no rule was evaluated. This is not a compliance verdict — the previous known result stands, and the device stays in this state until the audit can reach it again.</p>
+    </div>`;
+  } else if (!d.previous_at) {
+    note = `<div class="panel" style="padding:13px 14px;margin-top:9px">
+      <b style="font-size:13px">First audit for this device</b>
+      <p class="muted" style="font-size:12.5px;margin-top:5px">There is no earlier run to compare against, so no rule is marked as changed. Comparisons start from the next audit.</p>
+    </div>`;
+  } else if (d.changed === 0) {
+    note = `<div class="panel" style="padding:13px 14px;margin-top:9px">
+      <b style="font-size:13px">No rule changed since ${esc(d.previous_at)}</b>
+      <p class="muted" style="font-size:12.5px;margin-top:5px">Every declared rule matched exactly as it did in the previous audit.</p>
+    </div>`;
+  } else {
+    note = `<div class="panel" style="padding:13px 14px;margin-top:9px">
+      <b style="font-size:13px">${d.changed} rule(s) changed since ${esc(d.previous_at)}</b>
+      <p class="muted" style="font-size:12.5px;margin-top:5px">A rule that changes result between two audits means the running-config gained or lost a line the rule file requires. The dashboard reports it; it does not change the router back.</p>
+    </div>`;
+  }
+
+  box.innerHTML = `<div class="panel" style="padding:13px 15px">
+      <div class="row" style="justify-content:space-between">
+        <div><b style="font-size:15px">${esc(d.hostname)}</b>
+          <span class="muted" style="font-size:12px;margin-left:7px">audited ${esc(d.checked_at)}</span></div>
+        ${pill(d.status)}
+      </div>
+    </div>
+    <div class="panel" style="margin-top:9px;padding:13px 15px">
+      <div class="p-title" style="text-align:left;margin-bottom:8px">Declared rules</div>
+      <ul class="cmp-rules">${rules || '<li class="muted">No rules recorded.</li>'}</ul>
+    </div>
+    ${note}`;
 }
 
 function route() {

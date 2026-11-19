@@ -106,7 +106,7 @@ def audit_devices(desired: dict[str, Any]) -> list[dict[str, Any]]:
                 "status": "ERROR",
                 "findings": [{
                     "rule": "Configuration collection",
-                    "detail": "Không có file cấu hình mới. Kiểm tra SSH, inventory, vtysh và quyền truy cập.",
+                    "detail": "No fresh configuration snapshot. Check SSH, the inventory, vtysh and access rights.",
                 }],
             })
             continue
@@ -117,7 +117,7 @@ def audit_devices(desired: dict[str, Any]) -> list[dict[str, Any]]:
             if re.search(pattern, actual, re.MULTILINE) is None:
                 findings.append({
                     "rule": pattern,
-                    "detail": "Không tìm thấy cấu hình bắt buộc trong running-config.",
+                    "detail": "Required configuration was not found in the running-config.",
                 })
         results.append({
             "hostname": hostname,
@@ -159,7 +159,7 @@ def save_results(db_path: Path, results: list[dict[str, Any]], checked_at: str) 
             for device in results:
                 findings = device["findings"] or [{
                     "rule": "All required rules",
-                    "detail": "Tất cả cấu hình bắt buộc đều được tìm thấy.",
+                    "detail": "Every required configuration line was found.",
                 }]
                 for finding in findings:
                     con.execute(

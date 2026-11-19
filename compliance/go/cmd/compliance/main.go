@@ -94,15 +94,15 @@ type DesiredState struct {
 	Routers map[string]RouterSpec
 }
 
-// detail strings are user-facing and come straight from the Python original.
-// They are kept in Vietnamese deliberately: changing them here would change
-// what operators see in the dashboard for no functional gain.
+// detail strings are user-facing. They are kept in English and must stay
+// byte-identical to scripts/run_compliance.py, because tests/parity.py compares
+// the two tools' findings row by row.
 const (
-	detailNoSnapshot = "Không có file cấu hình mới. Kiểm tra SSH, inventory, vtysh và quyền truy cập."
-	detailMissing    = "Không tìm thấy cấu hình bắt buộc trong running-config."
+	detailNoSnapshot = "No fresh configuration snapshot. Check SSH, the inventory, vtysh and access rights."
+	detailMissing    = "Required configuration was not found in the running-config."
 	ruleCollection   = "Configuration collection"
 	ruleAllOK        = "All required rules"
-	detailAllOK      = "Tất cả cấu hình bắt buộc đều được tìm thấy."
+	detailAllOK      = "Every required configuration line was found."
 )
 
 func main() {

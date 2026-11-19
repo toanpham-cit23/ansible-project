@@ -1226,6 +1226,7 @@ func main() {
 	mux.HandleFunc("GET /api/me", withUser(handleMe))
 	mux.HandleFunc("GET /api/summary", withUser(handleSummary))
 	mux.HandleFunc("GET /api/compliance", withUser(handleCompliance))
+	mux.HandleFunc("GET /api/compliance/device", withUser(handleComplianceDevice))
 	mux.HandleFunc("GET /api/devices", withUser(handleDevices))
 	mux.HandleFunc("PATCH /api/devices/{id}", withAdmin(handlePatchDevice))
 	mux.HandleFunc("PUT /api/devices/{id}/credentials", withAdmin(handleCredentials))

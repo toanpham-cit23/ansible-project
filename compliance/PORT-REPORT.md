@@ -757,3 +757,95 @@ the gitignored `files/snmp/*.apk` on the Controller), then confirm the cards
 clear on the next poll. Decide whether the three test devices should remain in
 inventory; they are not part of the designed lab and are kept visible in the
 inventory table rather than being silently deleted.
+
+---
+
+## 14. Compliance scope, rule-level drift and guard failure demos — 2026-11-19
+
+The owner restated the module's contract, which changed the design mid-task:
+
+> The compliance module checks the presence of the required rules in the
+> running FRR config, records each check in SQLite, and shows the result on the
+> dashboard with the run time. The scope is the rule list the user declared —
+> extra configuration outside that list is not evaluated, and the module does
+> not fix configuration. Status is compliant or non-compliant; error means the
+> connection was lost.
+
+### 14.1 What that ruled out
+
+An in-progress change had started storing the **whole** collected running-config
+per audit and diffing it line by line, so that any hand edit would be visible.
+That is a superset of the stated scope: it would have judged configuration
+outside the declared rules, and it stored configuration text the module has no
+mandate to keep. It was reverted from both tools and from the dashboard before
+being committed. `compliance_configs` does not exist in any schema.
+
+### 14.2 What was built instead
+
+**Rule-level drift.** The device endpoint compares each declared rule's result
+against the previous run that audited that host. A rule that changes result
+between two audits means the running-config gained or lost a line the rule file
+requires — which is exactly the signal a direct edit produces, without judging
+anything outside the list.
+
+`GET /api/compliance/device?host=<name>` returns the device status, every
+declared rule with its result and detail, and `before`/`changed` for any rule
+whose outcome moved. It returns `found: false` when a host was not part of the
+latest run, rather than inventing a status.
+
+**Status vocabulary is unchanged and now pinned by tests:** `COMPLIANT`,
+`NON_COMPLIANT`, and `ERROR` only for a device the collector could not read.
+`ERROR` is never rendered as a compliance verdict.
+
+**Detail strings are English.** Both tools changed together, so
+`tests/parity.py` still reports byte-for-byte equality (`PARITY OK`).
+
+### 14.3 Dashboard page
+
+The Compliance view is now device-centric, in the shape of the controller
+screenshot the owner supplied: a device tree on the left with a status dot and
+a failing-rule count, and one device's evidence on the right — its verdict,
+every declared rule with a tick or cross, and a "changed since" badge on any
+rule whose result moved. Three honest empty states are distinguished:
+
+| Situation | What the page says |
+| --- | --- |
+| Device unreachable | "Could not be checked" — not a verdict; the previous known result stands |
+| First audit for the device | No comparison yet; comparisons start next run |
+| No rule changed | Every declared rule matched exactly as before |
+
+### 14.4 Rollback guard: what it does when things break
+
+`demo_rollback.py` replays the stub's iptables calls into a real rule list and
+walks a simulated SSH SYN from the controller through it, so a "blocked" result
+means the rule order would genuinely deny the packet. **3/3 scenarios pass:**
+
+1. **Lockout.** An operator inserts `DROP` above the SSH rule and never
+   confirms. SSH from `192.168.23.10` is **blocked**; after the 180 s tick the
+   guard detaches the chain and SSH is reachable again with nobody logged in.
+2. **Rejected rule.** iptables refuses a rule mid-set. `add()` rolls the entire
+   chain back immediately: nothing is left attached, no deadline remains, so no
+   half-applied firewall exists.
+3. **Lost confirmed chain.** Docker restarts the network and a confirmed chain
+   disappears. The guard reinstalls it silently and does **not** start a new
+   180 s countdown.
+
+Demo 1 is the meaningful one: at the moment the guard fires the host really is
+unreachable, which is the case no human can fix from outside.
+
+### 14.5 Files changed
+
+| File | Change |
+| --- | --- |
+| `files/dashboard/docker/api-go/compliance_device.go` | New device endpoint with rule-level drift |
+| `files/dashboard/docker/api-go/compliance_device_test.go` | Contract tests against a real in-memory schema |
+| `files/dashboard/docker/api/static/js/app.js` | Device-tree compliance page, three empty states |
+| `files/dashboard/docker/api/static/css/app.css` | Two-column layout, rule rows, change badge |
+| `files/ops/demo_rollback.py` | Three failure demos with a replayed ruleset |
+| `files/ops/README.md` | Demo table and how to run it |
+| `compliance/scripts/run_compliance.py` | English detail strings |
+| `compliance/go/cmd/compliance/main.go` | Same strings, kept byte-identical |
+| `files/dashboard/docker/api-go/go.mod`, `go.sum` | Indirect deps `go mod tidy` needs for a local build |
+
+Verification: 4 Python tests, Go compliance tests, `PARITY OK`, guard 6/6,
+demos 3/3, `node` syntax check on `app.js`, `go vet` clean on the API package.
