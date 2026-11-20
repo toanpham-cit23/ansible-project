@@ -129,16 +129,17 @@
     # An snmpd that was started before the new config was written keeps the
     # old community forever. `rc-service snmpd start` is a no-op on a running
     # daemon, so the play went green while v2c requests timed out and the
-    # dashboard drew every router as down. Restart whenever the file changed.
-    - name: Reload snmpd when its config changed
+    # dashboard drew every router as down. Restart unconditionally: it is a
+    # no-op semantically (the config is idempotent) and it is the only way to
+    # know the file actually loaded, including after an interrupted prior run.
+    - name: Restart snmpd so its config is actually loaded
       ansible.builtin.shell: |
         rc-service snmpd restart
         sleep 2
         rc-service snmpd status
       register: snmpd_restart
-      when: snmp_conf.changed
       failed_when: snmpd_restart.rc != 0
-      changed_when: true
+      changed_when: snmp_conf.changed
 
     - name: Wait for snmpd to be ready
       ansible.builtin.pause:

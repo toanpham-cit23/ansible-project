@@ -28,17 +28,14 @@
     # inside that range before enabling this task.
     - name: Apply ACL 10 to VTY lines
       ansible.builtin.shell: |
-        set -e
-        # FRR accepts `access-class 10 in` on older releases but rejects the
-        # direction on 10.6 ("Unknown command: access-class 10 in"). Try the
-        # documented form first and fall back to the form this build wants,
-        # rather than failing the whole deployment over a syntax difference.
+        # No `set -e`: vtysh exits non-zero on an unsupported direction, which
+        # must fall through to the fallback rather than abort the script.
         OUT=$(TERM=dumb vtysh \
           -c 'conf t' \
           -c 'line vty' \
           -c 'access-class 10 in' \
           -c 'end' \
-          -c 'write memory' 2>&1)
+          -c 'write memory' 2>&1) || true
         echo "$OUT"
         if echo "$OUT" | grep -q 'Unknown command'; then
           echo "FALLBACK: this FRR wants access-class without a direction"
