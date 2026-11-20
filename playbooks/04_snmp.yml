@@ -128,19 +128,40 @@
       ansible.builtin.pause:
         seconds: 3
 
-    - name: Verify AgentX socket and snmpd are both up
+    - name: Verify snmpd and the AgentX socket are up
       ansible.builtin.shell: |
-        TERM=dumb vtysh -c 'show run' 2>/dev/null | grep -q '^agentx' \
-          && echo "FRR_AGENTX_OK" || echo "FRR_AGENTX_MISSING"
         ps | grep '[s]nmpd' > /dev/null && echo "SNMPD_RUNNING" || echo "SNMPD_DOWN"
         [ -S /var/agentx/master ] && echo "AGENTX_SOCKET_OK" || echo "AGENTX_SOCKET_MISSING"
+        # FRR 10.6 on Alpine accepts `agentx` but does not persist it in the
+        # integrated config, so its presence is reported, never required.
+        TERM=dumb vtysh -c 'show run' 2>/dev/null | grep -q '^agentx' \
+          && echo "FRR_AGENTX_OK" || echo "FRR_AGENTX_NOT_PERSISTED"
       register: snmp_verify
       changed_when: false
       failed_when: false
 
+    # This is the check that matters to the dashboard: it polls SNMPv2c with
+    # this community. A running daemon that refuses the community is exactly
+    # the failure we saw — sysDescr answered v3 only, so every router stayed
+    # red while `rc-service snmpd status` said "started".
+    - name: Verify snmpd answers the dashboard's community
+      ansible.builtin.shell: |
+        timeout 8 snmpget -v2c -c "{{ snmp_community | default('public') }}" \
+          -t 5 -r 1 "{{ ansible_host }}" 1.3.6.1.2.1.1.1.0 2>&1
+      delegate_to: localhost
+      register: snmp_answer
+      changed_when: false
+      failed_when: >-
+        snmp_answer.rc != 0 or
+        'Timeout' in snmp_answer.stdout or
+        'no response' in snmp_answer.stdout or
+        'Unknown community' in snmp_answer.stdout
+
     - name: Show verification
       ansible.builtin.debug:
-        var: snmp_verify.stdout_lines
+        msg:
+          - "{{ snmp_verify.stdout_lines }}"
+          - "SNMP answer: {{ snmp_answer.stdout | trim }}"
 
     - name: Result
       ansible.builtin.debug:
@@ -150,21 +171,19 @@
       ansible.builtin.debug:
         msg: >-
           SNMP on {{ inventory_hostname }}:
-          {{ 'OK - snmpd running with FRR AgentX data'
-             if ('FRR_AGENTX_OK' in snmp_verify.stdout and 'SNMPD_RUNNING' in snmp_verify.stdout)
-             else 'FAILED - see the verification block above' }}
+          OK - snmpd running and answering v2c with the lab community.
+          FRR AgentX data: {{ 'available' if 'FRR_AGENTX_OK' in snmp_verify.stdout else 'not available on this FRR build' }}
 
     - name: Fail the play when SNMP is not actually working
       # The whole point of this playbook is a working agent. Reporting
       # "PARTIAL" and exiting 0 is what let the lab run for weeks with no
-      # snmpd, and only the dashboard noticed.
+      # usable SNMP, and only the dashboard noticed.
       ansible.builtin.fail:
         msg: >-
-          SNMP is not fully up on {{ inventory_hostname }}.
-          agentx={{ 'ok' if 'FRR_AGENTX_OK' in snmp_verify.stdout else 'missing' }},
-          snmpd={{ 'running' if 'SNMPD_RUNNING' in snmp_verify.stdout else 'down' }}.
-          Check: /etc/snmp/snmpd.conf, /etc/frr/daemons (agentx), and
-          /var/log/messages for snmpd.
+          SNMP is not usable on {{ inventory_hostname }}:
+          snmpd={{ 'running' if 'SNMPD_RUNNING' in snmp_verify.stdout else 'down' }},
+          v2c answer={{ snmp_answer.stdout | trim }}.
+          Check /etc/snmp/snmpd.conf for `rocommunity` and /var/log/messages.
       when: >-
-        'FRR_AGENTX_OK' not in snmp_verify.stdout or
-        'SNMPD_RUNNING' not in snmp_verify.stdout
+        'SNMPD_RUNNING' not in snmp_verify.stdout or
+        snmp_answer.rc != 0
