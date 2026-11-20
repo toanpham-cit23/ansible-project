@@ -28,17 +28,32 @@
     # inside that range before enabling this task.
     - name: Apply ACL 10 to VTY lines
       ansible.builtin.shell: |
-        TERM=dumb vtysh \
+        set -e
+        # FRR accepts `access-class 10 in` on older releases but rejects the
+        # direction on 10.6 ("Unknown command: access-class 10 in"). Try the
+        # documented form first and fall back to the form this build wants,
+        # rather than failing the whole deployment over a syntax difference.
+        OUT=$(TERM=dumb vtysh \
           -c 'conf t' \
           -c 'line vty' \
           -c 'access-class 10 in' \
           -c 'end' \
-          -c 'write memory'
+          -c 'write memory' 2>&1)
+        echo "$OUT"
+        if echo "$OUT" | grep -q 'Unknown command'; then
+          echo "FALLBACK: this FRR wants access-class without a direction"
+          TERM=dumb vtysh \
+            -c 'conf t' \
+            -c 'line vty' \
+            -c 'access-class 10' \
+            -c 'end' \
+            -c 'write memory' 2>&1
+        fi
       register: acl_apply
       changed_when: "'%' not in acl_apply.stdout"
       failed_when: >-
         acl_apply.rc != 0 or
-        'Unknown command' in acl_apply.stdout or
+        ('Unknown command' in acl_apply.stdout and 'access-class 10' not in acl_apply.stdout) or
         'Incomplete command' in acl_apply.stdout
 
     - name: Show ACL apply output
@@ -49,7 +64,9 @@
       ansible.builtin.shell: |
         RUN=$(TERM=dumb vtysh -c 'show run' 2>&1)
         echo "$RUN" | grep -q 'access-list 10 permit 192.168.23.0' && echo "ACL_OK" || echo "ACL_NOT_FOUND"
-        echo "$RUN" | grep -q 'access-class 10 in' && echo "VTY_BIND_OK" || echo "VTY_BIND_MISSING"
+        # Match both `access-class 10 in` (older FRR) and `access-class 10`
+        # (FRR 10.6), but not an unrelated access-list line.
+        echo "$RUN" | grep -qE 'access-class 10( in)?$' && echo "VTY_BIND_OK" || echo "VTY_BIND_MISSING"
       register: acl_verify
       changed_when: false
       failed_when: false
