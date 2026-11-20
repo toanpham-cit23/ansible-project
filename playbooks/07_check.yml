@@ -105,8 +105,11 @@
 
         [ -f /etc/snmp/snmpd.conf ] && echo "CFG_OK: snmpd.conf" || echo "CFG_MISSING: snmpd.conf (04_snmp.yml)"
         ps | grep '[s]nmpd' > /dev/null && echo "SERVICE_OK: snmpd" || echo "SERVICE_DOWN: snmpd (04_snmp.yml)"
-        TERM=dumb vtysh -c 'show run' 2>/dev/null | grep -q '^agentx' \
-          && echo "CFG_OK: frr agentx" || echo "CFG_MISSING: frr agentx (04_snmp.yml)"
+        # FRR 10.6 on Alpine accepts `agentx` but never persists it in the
+        # integrated config. Checking for the line reports a false drift on a
+        # healthy agent, so check the AgentX socket that snmpd actually opened.
+        [ -S /var/agentx/master ] \
+          && echo "CFG_OK: agentx socket" || echo "CFG_MISSING: agentx socket (04_snmp.yml)"
 
         ps | grep '[z]abbix_agentd' > /dev/null \
           && echo "SERVICE_OK: zabbix-agent" || echo "OPTIONAL_ABSENT: zabbix-agent (removed 2026-10-28)"
