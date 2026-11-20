@@ -94,6 +94,7 @@
           master agentx
         dest: /etc/snmp/snmpd.conf
         mode: '0644'
+      register: snmp_conf
     - name: Verify snmpd binary exists
       ansible.builtin.shell: command -v snmpd || ls /usr/sbin/snmpd
       register: snmpd_library
@@ -124,6 +125,21 @@
         rc-service snmpd status
       register: snmpd_start
       failed_when: snmpd_start.rc != 0
+
+    # An snmpd that was started before the new config was written keeps the
+    # old community forever. `rc-service snmpd start` is a no-op on a running
+    # daemon, so the play went green while v2c requests timed out and the
+    # dashboard drew every router as down. Restart whenever the file changed.
+    - name: Reload snmpd when its config changed
+      ansible.builtin.shell: |
+        rc-service snmpd restart
+        sleep 2
+        rc-service snmpd status
+      register: snmpd_restart
+      when: snmp_conf.changed
+      failed_when: snmpd_restart.rc != 0
+      changed_when: true
+
     - name: Wait for snmpd to be ready
       ansible.builtin.pause:
         seconds: 3
