@@ -69,7 +69,7 @@ case "${1:-status}" in
       fi
     }
     # Never interfere with Docker's own bridge, loopback or replies to
-    # connections this host opened (SNMP walks, NTP, package fetches).
+    # connections this host opened (SNMP walks, package fetches).
     add -i lo -j ACCEPT
     add -i docker0 -j ACCEPT
     add -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -77,6 +77,12 @@ case "${1:-status}" in
     add -p tcp --dport 22 -s 192.168.23.0/24 -j ACCEPT
     add -p udp --dport 53 -j ACCEPT
     add -p udp --dport 161 -j ACCEPT
+    # NTP. The routers use this host as their time source (03_ntp.yml sets
+    # "server 192.168.23.10"), and chrony needs an inbound rule here as well as
+    # the "allow" line in chrony.conf. Without it the source shows "^?" and
+    # every run reports "ntp not synced". Restricted to the lab subnet: this is
+    # a time server for the lab, not an open one.
+    add -p udp --dport 123 -s 192.168.23.0/24 -j ACCEPT
     add -p tcp --dport 8080 -j ACCEPT
     add -p tcp --dport 8443 -j ACCEPT
     add -p icmp -j ACCEPT

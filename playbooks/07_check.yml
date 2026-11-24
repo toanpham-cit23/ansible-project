@@ -207,9 +207,13 @@
       ansible.builtin.copy:
         dest: "/tmp/lab-remediation-{{ inventory_hostname }}.txt"
         mode: "0644"
-        content: |
-          {% for pb in remediation_playbooks %}{{ pb }}
-          {% endfor %}
+        # Always emit at least the trailing newline. A "content: |" block with a
+        # bare for-loop renders to the empty string when the host is clean, and
+        # ansible.builtin.copy rejects empty content with
+        #   "Task failed: Action failed: src (or content) is required"
+        # which turned a clean host into a failed run. The driver skips blank
+        # lines, so a lone newline means "nothing to repair", as intended.
+        content: "{{ remediation_playbooks | join('\n') }}\n"
       delegate_to: localhost
 
     - name: Final status
