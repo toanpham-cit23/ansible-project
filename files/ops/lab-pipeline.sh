@@ -114,6 +114,12 @@ while [ -n "$PLAN" ] && [ "$pass" -le "$MAX_PASS" ]; do
     for pb in $PLAN; do
         # only the hosts that reported this playbook as missing
         who=$(awk -v p="$pb" '$1==p {printf "%s,", $2}' /tmp/lab-replan.txt | sed 's/,$//')
+        # Always add localhost. Some repairs have a controller-side half that a
+        # router-only limit would filter out - 03_ntp.yml now has to run
+        # "allow 192.168.23.0/24" on the controller before the routers can sync
+        # at all. Implicit localhost always resolves, so this is harmless for
+        # playbooks that have no local play.
+        who="$who,localhost"
         log "--- $pb  (limit: $who)"
         if [ "$DRY_RUN" -eq 1 ]; then
             log "    would run: $APB playbooks/$pb --limit $who"

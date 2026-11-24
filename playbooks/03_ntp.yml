@@ -1,4 +1,62 @@
 ---
+# 03_ntp.yml - make the controllers serve time, then point the routers at them.
+#
+# This playbook used to be one play that only edited /etc/chrony/chrony.conf on
+# the routers, setting "server 192.168.23.10 iburst". Nothing ever configured
+# 192.168.23.10 to ANSWER NTP, and chrony refuses to serve a subnet unless it
+# has an "allow" line, so chronyd ran with no UDP :123 listener at all. Every
+# router pointed at a server that silently dropped its packets, so
+# 07_check.yml reported "ntp not synced" on every run and re-running 03_ntp.yml
+# could never fix it - the fault was on the other end of the wire.
+#
+# Play 1 (controller) adds the missing half: bind the server socket and allow
+# the router subnet. Play 2 is the original router configuration, unchanged.
+- name: NTP server on the controller
+  hosts: localhost
+  gather_facts: no
+  # No become: the pipeline runs as root on the controller (doas), and Alpine
+  # has no sudo, so become: true would fail here rather than help.
+  tasks:
+    - name: Allow the router subnet to query this controller
+      ansible.builtin.lineinfile:
+        path: /etc/chrony/chrony.conf
+        line: "allow 192.168.23.0/24"
+        state: present
+        create: yes
+        mode: '0644'
+      register: allow_line
+
+    # Without "port 123" chronyd still opens the socket, but Alpine's stock
+    # config ships no allow line at all, so this also covers the case where a
+    # future image drops the listener entirely.
+    - name: Make sure the NTP server socket is enabled
+      ansible.builtin.lineinfile:
+        path: /etc/chrony/chrony.conf
+        line: "port 123"
+        state: present
+        create: yes
+        mode: '0644'
+      register: port_line
+
+    # ansible.builtin.service does not reliably drive OpenRC, and the router
+    # play below already restarts chronyd with rc-service. Match that.
+    - name: Restart chronyd to bind the server socket
+      ansible.builtin.shell: rc-service chronyd restart
+      when: allow_line.changed or port_line.changed
+
+    - name: Confirm the controller is listening on UDP 123
+      ansible.builtin.shell: "ss -lnu 2>/dev/null | grep -qE ':123[[:space:]]' && echo LISTENING || echo NOT_LISTENING"
+      register: ntp_listen
+      changed_when: false
+      failed_when: false
+
+    - name: Warn when the server socket did not come up
+      ansible.builtin.debug:
+        msg: >-
+          WARNING - chronyd is not listening on UDP 123 after the restart.
+          The routers will keep reporting "ntp not synced" until it does.
+      when: "'LISTENING' not in ntp_listen.stdout"
+
 - name: NTP Configuration for Routers
   hosts: routers
   gather_facts: no
@@ -61,9 +119,19 @@
     - name: Restart chrony if config changed
       ansible.builtin.shell: rc-service chronyd restart
       when: ntp_config.changed
-    - name: Wait for sync
-      ansible.builtin.pause:
-        seconds: 10
+    # A cold chronyd needs more than a fixed sleep to settle: it has to poll,
+    # pick a source and step. Waiting 10s and moving on meant 07_check.yml
+    # could report "ntp not synced" on a router that was about to sync. Poll
+    # the actual condition instead, with a bounded retry.
+    - name: Wait for the router to actually sync
+      ansible.builtin.shell: "chronyc tracking 2>/dev/null | grep -q 'Leap status *: *Normal' && echo SYNCED || echo WAITING"
+      register: ntp_sync
+      until: "'SYNCED' in ntp_sync.stdout"
+      retries: 12
+      delay: 5
+      changed_when: false
+      failed_when: false
+
     - name: Check NTP status
       ansible.builtin.shell: |
         echo "=== Date ==="
@@ -71,7 +139,9 @@
         echo "=== Timezone ==="
         cat /etc/timezone
         echo "=== NTP Tracking ==="
-        chronyc tracking | head -5
+        # No head -5: Leap status is the last line of chronyc tracking, so
+        # truncating to five lines always hid the one field that gets checked.
+        chronyc tracking
       register: status
       ignore_errors: yes
     - name: Show NTP status
