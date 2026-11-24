@@ -2,18 +2,40 @@
 # Main deployment pipeline - run with:
 #   ansible-playbook playbooks/master.yml
 #
-# One-off / operational playbooks are NOT imported here on purpose:
-#   08_vault.yml      -> run once to encrypt token.yml (needs .vault_pass)
-#   09_git_github.yml -> run after 08_vault to push the repo
-#                        (it loads token.yml, so a fresh clone fails without it)
-#   10_cron.yml       -> run once to schedule the automatic backup job
-#   14_restore.yml    -> destructive, needs -e confirm_restore=yes
+# Or better, with the repair loop and the push-back in one command:
+#   ./files/ops/lab-pipeline.sh
 #
-# Correct first-time order:
-#   master.yml -> 08_vault.yml -> 09_git_github.yml -> 10_cron.yml
+# ---------------------------------------------------------------------------
+# ORDER (changed 2026-11-24)
+#
+#   00_precheck.yml   GitHub sync, then router pre-flight
+#                     * no working copy -> clone (first install)
+#                     * working copy    -> git pull (receive updates only)
+#                     The controller never commits here.
+#
+#   00_hostname .. 15_dashboard   the deployment itself
+#
+#   -- repair loop --  only when driven by files/ops/lab-pipeline.sh:
+#                     07_check.yml writes /tmp/lab-remediation-<host>.txt and
+#                     the driver re-runs <NN>_<name>.yml by number.
+#
+#   09_git_github.yml upload the finished run, so the next cycle starts from
+#                     the state this run produced. Only pushes when token.yml
+#                     exists and is vault-encrypted; otherwise it says why and
+#                     skips - a first install must not die here.
+#
+# Still NOT part of master.yml on purpose:
+#   08_vault.yml   run once to encrypt token.yml (needs .vault_pass)
+#   10_cron.yml    run once to schedule the automatic backup job
+#   14_restore.yml destructive, needs -e confirm_restore=yes
+#
+# First-time order:
+#   master.yml (clones with -e github_token=...) -> 08_vault.yml -> 10_cron.yml
+#   Every run after that: ./files/ops/lab-pipeline.sh
 #
 # Zabbix and phpIPAM were removed from the pipeline on 2026-10-28: the monitoring
 # platform they deployed has been replaced by the dashboard (15_dashboard.yml).
+# ---------------------------------------------------------------------------
 - import_playbook: 00_precheck.yml
 - import_playbook: 00_hostname.yml
 - import_playbook: 01_fix_frr.yml
@@ -24,3 +46,5 @@
 - import_playbook: 06_backup.yml
 - import_playbook: 07_check.yml
 - import_playbook: 15_dashboard.yml
+# Push last: the run is only worth uploading once everything above succeeded.
+- import_playbook: 09_git_github.yml

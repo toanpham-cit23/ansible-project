@@ -188,6 +188,30 @@
       ansible.builtin.debug:
         var: missing_items
 
+    # The check reports drift as "CFG_MISSING: <what> (NN_name.yml)" but some
+    # lines add a remark inside the brackets, e.g.
+    #   "CFG_MISSING: hostname (01_fix_frr.yml sets it)"
+    # so the pattern allows trailing words before the closing bracket.
+    - name: Extract the playbooks this host needs
+      ansible.builtin.set_fact:
+        remediation_playbooks: >-
+          {{ (missing_items
+              | map('regex_search', '\(([0-9]{2}_[A-Za-z0-9_]+\.yml)[^)]*\)')
+              | select('string')
+              | map('regex_replace', '.*\(([0-9]{2}_[A-Za-z0-9_]+\.yml)[^)]*\).*', '\1')
+              | list
+              | unique
+              | sort) }}
+
+    - name: Write this host's remediation list for the pipeline driver
+      ansible.builtin.copy:
+        dest: "/tmp/lab-remediation-{{ inventory_hostname }}.txt"
+        mode: "0644"
+        content: |
+          {% for pb in remediation_playbooks %}{{ pb }}
+          {% endfor %}
+      delegate_to: localhost
+
     - name: Final status
       ansible.builtin.debug:
         msg: >-
@@ -195,5 +219,6 @@
              ' - router fully configured, continuing to the end'
              if (missing_items | length == 0)
              else 'ATTENTION ' ~ inventory_hostname ~
-                  ' - configuration needed, run these playbooks: ' ~
-                  (missing_items | join(' | ')) }}
+                  ' - configuration needed, re-running: ' ~
+                  (remediation_playbooks | join(', ')) ~
+                  ' | detail: ' ~ (missing_items | join(' | ')) }}

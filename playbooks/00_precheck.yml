@@ -1,8 +1,177 @@
 ---
-# 00_precheck.yml - Fail fast when a router is not reachable
-# Run: ansible-playbook playbooks/00_precheck.yml
-# Runs first in master.yml so a dead router is reported clearly instead of
-# blowing up somewhere in the middle of a deployment.
+# 00_precheck.yml - Repo sync + fail fast when a router is not reachable
+#
+# Runs first in master.yml and does two things now:
+#
+#   PLAY 1 (localhost) - GitHub sync, "receive updates only"
+#     * No working copy yet  -> clone from GitHub (first install)
+#     * Working copy exists  -> git pull --rebase --autostash (update)
+#     The controller never commits here. Committing/pushing is the job of
+#     09_git_github.yml, which master.yml imports LAST so a finished run
+#     uploads its result and starts the next cycle.
+#
+#   PLAY 2 (routers) - pre-flight checks (unchanged behaviour)
+#
+# Run standalone:
+#   ansible-playbook playbooks/00_precheck.yml
+#   ansible-playbook playbooks/00_precheck.yml -e github_token=ghp_xxx   # first install
+#
+- name: Sync the project from GitHub (clone on first install, pull afterwards)
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars:
+    project_dir: /root/ansible-project
+    github_repo: "https://github.com/toanpham-cit23/ansible-project.git"
+    github_branch: main
+    # Overridable so a first install can bootstrap before token.yml exists.
+    github_token: "{{ lookup('env', 'GITHUB_TOKEN') | default('', true) }}"
+
+  tasks:
+    - name: Look for an existing working copy
+      ansible.builtin.stat:
+        path: "{{ project_dir }}/.git"
+      register: repo_state
+
+    # ---------------- FIRST INSTALL ----------------
+
+    - name: Refuse a first install without a token
+      ansible.builtin.fail:
+        msg: >-
+          No working copy at {{ project_dir }} and no GitHub token available.
+          A first install has to clone the private repo before token.yml exists,
+          so pass the token explicitly:
+            ansible-playbook playbooks/master.yml -e github_token=<token>
+          or export GITHUB_TOKEN=<token>.
+      when:
+        - not repo_state.stat.exists
+        - github_token | length == 0
+
+    - name: Create the project directory
+      ansible.builtin.file:
+        path: "{{ project_dir }}"
+        state: directory
+        mode: "0755"
+      when: not repo_state.stat.exists
+
+    - name: Clone the repository (first install)
+      # Token goes through a short-lived askpass helper, never into the URL and
+      # therefore never into .git/config. Same rule 09_git_github.yml enforces.
+      ansible.builtin.shell: |
+        set -e
+        A=$(mktemp /tmp/.lab-clone-askpass.XXXXXX)
+        printf '#!/bin/sh\ncase "$1" in *[Uu]sername*) echo "x-access-token";; *) echo "%s";; esac\n' "{{ github_token }}" > "$A"
+        chmod 700 "$A"
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$A" \
+          git clone --branch "{{ github_branch }}" "{{ github_repo }}" "{{ project_dir }}.tmp" \
+          > /tmp/lab-clone.log 2>&1 || { RC=$?; sed -E "s#{{ github_token }}#<redacted>#g" /tmp/lab-clone.log | tail -5; rm -f "$A" /tmp/lab-clone.log; exit $RC; }
+        rm -f "$A" /tmp/lab-clone.log
+        if [ -d "{{ project_dir }}" ] && [ -n "$(ls -A "{{ project_dir }}" 2>/dev/null)" ]; then
+          echo "CLONE_SKIPPED_TARGET_NOT_EMPTY"
+        else
+          rmdir "{{ project_dir }}" 2>/dev/null || true
+          mv "{{ project_dir }}.tmp" "{{ project_dir }}"
+          echo "CLONE_OK"
+        fi
+      args:
+        executable: /bin/sh
+      register: clone
+      when: not repo_state.stat.exists
+      no_log: true
+      changed_when: "'CLONE_OK' in clone.stdout"
+
+    - name: Show clone result
+      ansible.builtin.debug:
+        msg: "{{ 'First install: repository cloned' if 'CLONE_OK' in clone.stdout | default('') else 'Clone skipped (target already populated)' }}"
+      when: not repo_state.stat.exists
+
+    # ---------------- UPDATE ----------------
+
+    - name: Read the token from the vault so the pull can authenticate
+      ansible.builtin.shell: |
+        if [ ! -f "{{ project_dir }}/token.yml" ]; then echo MISSING; exit 0; fi
+        if ! head -1 "{{ project_dir }}/token.yml" | grep -q '^\$ANSIBLE_VAULT'; then echo PLAINTEXT; exit 0; fi
+        if [ ! -f "{{ project_dir }}/.vault_pass" ]; then echo NO_VAULT_PASS; exit 0; fi
+        ansible-vault view "{{ project_dir }}/token.yml" \
+          --vault-password-file "{{ project_dir }}/.vault_pass" 2>/dev/null \
+          | sed -n 's/^github_token:[[:space:]]*//p' | tr -d '\r\n'
+      args:
+        chdir: "{{ project_dir }}"
+        executable: /bin/sh
+      register: pull_token
+      when: repo_state.stat.exists
+      no_log: true
+      changed_when: false
+
+    - name: Resolve which token to pull with
+      ansible.builtin.set_fact:
+        effective_token: >-
+          {{ github_token if github_token | length > 0
+             else (pull_token.stdout | trim if pull_token.stdout | trim not in ['MISSING','PLAINTEXT','NO_VAULT_PASS',''] else '') }}
+      when: repo_state.stat.exists
+
+    - name: Warn when the pull cannot authenticate
+      ansible.builtin.debug:
+        msg: >-
+          token.yml is {{ pull_token.stdout | trim }} and no github_token was supplied.
+          The pull will be attempted without credentials (fine for a public repo,
+          will fail for a private one). Pass -e github_token=<token> to fix.
+      when:
+        - repo_state.stat.exists
+        - effective_token | length == 0
+
+    - name: Fetch and fast-forward the working copy (update)
+      # --rebase --autostash keeps any local change the lab made; a finished run
+      # pushes it in 09_git_github.yml, so a plain reset --hard would lose work.
+      ansible.builtin.shell: |
+        set -e
+        cd "{{ project_dir }}"
+        if [ -n "{{ effective_token | default('') }}" ]; then
+          A=$(mktemp /tmp/.lab-pull-askpass.XXXXXX)
+          printf '#!/bin/sh\ncase "$1" in *[Uu]sername*) echo "x-access-token";; *) echo "%s";; esac\n' "{{ effective_token }}" > "$A"
+          chmod 700 "$A"
+          export GIT_ASKPASS="$A" GIT_TERMINAL_PROMPT=0
+        fi
+        BEFORE=$(git rev-parse --short HEAD 2>/dev/null || echo none)
+        git fetch --prune origin "{{ github_branch }}" > /tmp/lab-pull.log 2>&1 || { RC=$?; tail -5 /tmp/lab-pull.log; rm -f /tmp/lab-pull.log; [ -n "${A:-}" ] && rm -f "$A"; exit $RC; }
+        if git merge-base --is-ancestor "origin/{{ github_branch }}" HEAD 2>/dev/null; then
+          echo "ALREADY_UP_TO_DATE at $BEFORE"
+        else
+          git pull --rebase --autostash origin "{{ github_branch }}" >> /tmp/lab-pull.log 2>&1 || { RC=$?; tail -8 /tmp/lab-pull.log; rm -f /tmp/lab-pull.log; [ -n "${A:-}" ] && rm -f "$A"; exit $RC; }
+          echo "UPDATED $BEFORE -> $(git rev-parse --short HEAD)"
+        fi
+        rm -f /tmp/lab-pull.log
+        [ -n "${A:-}" ] && rm -f "$A"
+        true
+      args:
+        executable: /bin/sh
+      register: pull
+      when: repo_state.stat.exists
+      no_log: true
+      changed_when: "'UPDATED' in pull.stdout | default('')"
+
+    - name: Show update result
+      ansible.builtin.debug:
+        msg: "{{ pull.stdout | default('skipped') | trim }}"
+      when: repo_state.stat.exists
+
+    # ---------------- SHARED ----------------
+
+    - name: Confirm the working copy is usable
+      ansible.builtin.stat:
+        path: "{{ project_dir }}/playbooks/master.yml"
+      register: tree_state
+
+    - name: Fail when the tree is incomplete
+      ansible.builtin.fail:
+        msg: >-
+          {{ project_dir }}/playbooks/master.yml is missing after the sync.
+          The clone or the pull did not produce a usable tree - check the log
+          above before running the deployment.
+      when: not tree_state.stat.exists
+
+# ---------------------------------------------------------------------------
+
 - name: Pre-flight checks before deployment
   hosts: routers
   gather_facts: no

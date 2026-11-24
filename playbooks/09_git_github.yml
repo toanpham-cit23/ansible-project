@@ -18,6 +18,30 @@
     commit_msg: "Lab dashboard: ops layer, trusted HTTPS, Cloudflare tunnel, controller card cleanup"
 
   tasks:
+    - name: Check the vault material this playbook needs
+      ansible.builtin.shell: |
+        d="{{ project_dir }}"
+        [ -f "$d/token.yml" ]   || { echo NO_TOKEN; exit 0; }
+        [ -f "$d/.vault_pass" ] || { echo NO_VAULT_PASS; exit 0; }
+        head -1 "$d/token.yml" | grep -q '^\$ANSIBLE_VAULT' && echo READY || echo PLAINTEXT
+      register: vault_state
+      changed_when: false
+
+    - name: Skip the push when the vault is not set up yet
+      # master.yml now imports this playbook at the end of every run, so it has
+      # to be harmless on a first install where 08_vault.yml has not run yet.
+      # It reports why it stepped aside instead of failing the whole pipeline.
+      ansible.builtin.debug:
+        msg: >-
+          PUSH_SKIPPED - {{ vault_state.stdout | trim }}.
+          Run `ansible-playbook playbooks/08_vault.yml --vault-password-file .vault_pass`
+          once to create the encrypted token, then this stage will upload.
+      when: vault_state.stdout | trim != 'READY'
+
+    - name: Stop here when there is nothing to push with
+      ansible.builtin.meta: end_play
+      when: vault_state.stdout | trim != 'READY'
+
     - name: Verify token.yml exists and is vault-encrypted
       ansible.builtin.shell: |
         f="{{ project_dir }}/token.yml"
