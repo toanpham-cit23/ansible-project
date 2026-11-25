@@ -3,9 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="format-detection" content="telephone=no">
 <title>Lab</title>
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/css/app.css?v=39">
+<link rel="stylesheet" href="/static/css/app.css?v=40">
+<!-- Classify the device BEFORE first paint so the phone layout never flashes
+     a desktop-width page. Touch + narrow viewport = phone; pointer + wide = PC. -->
+<script>
+(function () {
+  var touch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+  var narrow = Math.min(window.innerWidth, window.screen.width) <= 820;
+  var phone = touch && narrow;
+  document.documentElement.classList.add(phone ? 'device-phone' : 'device-pc');
+  document.documentElement.dataset.input = phone ? 'touch' : 'pointer';
+})();
+</script>
 </head>
 <body>
 <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden">

@@ -98,7 +98,16 @@ def collect_configs(inventory: Path, playbook: Path, skip_collect: bool) -> tupl
 
 def audit_devices(desired: dict[str, Any]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    for hostname, spec in desired["routers"].items():
+    # Routers keep their FRR rules. Switches and simulated PCs have their own
+    # desired state (SNMP agent + identity) collected by the `switches` play in
+    # collect_configs.yml. Both feed the same rule loop below, so a switch is a
+    # first-class audit target rather than a router-shaped special case.
+    targets: list[tuple[str, dict[str, Any]]] = [
+        (h, s) for h, s in desired.get("routers", {}).items()
+    ] + [
+        (h, s) for h, s in desired.get("switches", {}).items()
+    ]
+    for hostname, spec in targets:
         config_path = ACTUAL_DIR / f"{hostname}.conf"
         if not config_path.is_file():
             results.append({
@@ -144,32 +153,50 @@ def save_results(db_path: Path, results: list[dict[str, Any]], checked_at: str) 
     # handle therefore stays open until it is garbage collected, which on
     # Windows keeps an exclusive lock on the .db file and makes callers that
     # clean up a temp directory fail with WinError 32. Close it explicitly.
-    con = sqlite3.connect(db_path, timeout=15)
-    try:
-        with con:
-            con.execute("PRAGMA foreign_keys = ON")
+    # The dashboard poller writes health samples continuously and holds the
+    # SQLite WAL write lock. A single INSERT can lose the race even with a busy
+    # timeout, so retry the whole short transaction a few times. On a busy lab
+    # this previously computed a perfect audit and then silently dropped the
+    # history, leaving the dashboard stuck on "No audit results yet".
+    import time as _time
+
+    last_error: Exception | None = None
+    for attempt in range(6):
+        con = sqlite3.connect(db_path, timeout=10)
+        try:
+            con.execute("PRAGMA busy_timeout = 10000")
+            # executescript commits on its own; do it before the write
+            # transaction so the schema check never holds the lock.
             con.executescript(SCHEMA)
-            cur = con.execute(
-                """INSERT INTO compliance_runs
-                (checked_at,status,devices_total,devices_compliant,devices_noncompliant,devices_error)
-                VALUES (?,?,?,?,?,?)""",
-                (checked_at, overall, len(results), compliant, noncompliant, errors),
-            )
-            run_id = int(cur.lastrowid)
-            for device in results:
-                findings = device["findings"] or [{
-                    "rule": "All required rules",
-                    "detail": "Every required configuration line was found.",
-                }]
-                for finding in findings:
-                    con.execute(
-                        """INSERT INTO compliance_findings
-                        (run_id,hostname,status,rule,detail) VALUES (?,?,?,?,?)""",
-                        (run_id, device["hostname"], device["status"], finding["rule"], finding["detail"]),
-                    )
-    finally:
-        con.close()
-    return run_id
+            with con:
+                con.execute("PRAGMA foreign_keys = ON")
+                cur = con.execute(
+                    """INSERT INTO compliance_runs
+                    (checked_at,status,devices_total,devices_compliant,devices_noncompliant,devices_error)
+                    VALUES (?,?,?,?,?,?)""",
+                    (checked_at, overall, len(results), compliant, noncompliant, errors),
+                )
+                run_id = int(cur.lastrowid)
+                for device in results:
+                    findings = device["findings"] or [{
+                        "rule": "All required rules",
+                        "detail": "Every required configuration line was found.",
+                    }]
+                    for finding in findings:
+                        con.execute(
+                            """INSERT INTO compliance_findings
+                            (run_id,hostname,status,rule,detail) VALUES (?,?,?,?,?)""",
+                            (run_id, device["hostname"], device["status"], finding["rule"], finding["detail"]),
+                        )
+            return run_id
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            last_error = exc
+            _time.sleep(0.5 * (attempt + 1))
+        finally:
+            con.close()
+    raise last_error  # type: ignore[misc]
 
 
 def main() -> int:

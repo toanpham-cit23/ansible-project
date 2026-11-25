@@ -36,3 +36,27 @@ routers:
       - '^\s*network 192\.168\.23\.0/24 area 0$'
       - '^\s*network 3\.3\.3\.3/32 area 0$'
       - '^(?:[ \t]*passive-interface lo|interface lo\r?$\n(?:[ \t]+[^\n]*\r?\n)*?[ \t]+ip ospf passive)$'
+
+# ---------------------------------------------------------------------------
+# Switches / simulated L3 devices (added 2026-11-25).
+#
+# These host a net-snmp agent instead of FRR. The collector writes a text
+# snapshot with "# hostname", "# snmpd.conf" and "# interfaces" sections, so
+# the same required_patterns loop audits them exactly like routers.
+# ---------------------------------------------------------------------------
+switches:
+  test-l3switch:
+    required_patterns:
+      - 'rocommunity public 192\.168\.23\.0/24'
+      - 'agentAddress udp:161'
+      - 'sysName test-l3switch'
+  test-switch:
+    required_patterns:
+      - 'rocommunity public 192\.168\.23\.0/24'
+      - 'agentAddress udp:161'
+      - 'sysName test-switch'
+  test-router:
+    required_patterns:
+      - 'rocommunity public 192\.168\.23\.0/24'
+      - 'agentAddress udp:161'
+      - 'sysName test-router'

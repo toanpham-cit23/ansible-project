@@ -1641,7 +1641,7 @@ const views = {
         </div>
         <div class="panel op">
           <div class="p-title">Node telemetry</div>
-          <table class="op-table"><thead><tr>
+          <div class="op-table-wrap"><table class="op-table"><thead><tr>
             <th>Node</th><th>SSH</th><th>CPU</th><th>RAM</th><th>RTT</th><th>Uptime</th>
           </tr></thead><tbody>${(tele.nodes || []).map((n) => `<tr>
             <td><b>${esc(n.hostname)}</b></td>
@@ -1650,7 +1650,7 @@ const views = {
             <td>${n.mem_pct == null ? '—' : Math.round(n.mem_pct) + '%'}</td>
             <td>${n.rtt_ms == null ? '—' : n.rtt_ms + ' ms'}</td>
             <td>${uptime(n.uptime_s)}</td>
-          </tr>`).join('')}</tbody></table>
+          </tr>`).join('')}</tbody></table></div>
         </div>
       </div>
       <div class="panel op" style="margin-top:9px">
@@ -2688,6 +2688,22 @@ const views = {
           ? `<button class="act" data-act="dev-del" data-id="${d.id}" data-host="${esc(d.hostname)}">Remove</button>` : ''}</td>
       </tr>`).join('');
 
+    // SSH pool: credentials stay server-side; the browser only learns whether
+    // one is stored, so this panel is safe to show to non-admin users too.
+    const sshPool = await api.get('/api/ssh/pool').catch(() => ({ devices: [], with_credential: 0 }));
+    const sshPoolRows = (sshPool.devices || []).map((s) => `
+      <tr>
+        <td><b>${esc(s.hostname)}</b></td>
+        <td class="mono">${esc(s.ip)}</td>
+        <td>${esc(s.kind)}</td>
+        <td class="mono">${esc(s.username || '\u2014')}</td>
+        <td class="mono">${esc(String(s.port || 22))}</td>
+        <td>${s.has_credential
+          ? '<span class="chip chip-ok">stored</span>'
+          : '<span class="chip chip-warn">none</span>'}</td>
+      </tr>`).join('') || `<tr><td colspan="6" class="muted" style="text-align:center;padding:14px">
+        No devices with SSH access yet.</td></tr>`;
+
     const propRows = props.length ? props.map((p) => `
       <tr>
         <td><b>${esc(p.a)}</b> \u2194 <b>${esc(p.b)}</b></td>
@@ -2740,6 +2756,17 @@ const views = {
             <th>Last seen</th><th></th></tr></thead>
           <tbody>${devRows}</tbody>
         </table>
+      </div>
+      <div style="margin-top:12px">
+        <div class="row" style="margin-bottom:6px;gap:9px">
+          <b style="font-size:13.5px">SSH access pool</b>
+          <span class="muted" style="font-size:12.5px">how to reach each switch, router and PC</span>
+        </div>
+        <div class="panel" style="padding:4px 8px">
+          <div class="op-table-wrap"><table class="op-table ssh-pool"><thead><tr>
+            <th>Device</th><th>Address</th><th>Kind</th><th>User</th><th>Port</th><th>Credential</th>
+          </tr></thead><tbody>${sshPoolRows}</tbody></table></div>
+        </div>
       </div>
       <div style="margin-top:12px">
         <div class="row" style="margin-bottom:6px">

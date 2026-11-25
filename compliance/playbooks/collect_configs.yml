@@ -16,3 +16,35 @@
         dest: "{{ playbook_dir }}/../reports/actual/{{ inventory_hostname }}.conf"
         mode: '0600'
       delegate_to: localhost
+
+# Switches and simulated PCs do not run FRR, so `vtysh` does not exist there.
+# Their desired state is the SNMP agent configuration plus basic identity.
+# Collect the same text shape the auditor reads for a router, so one audit
+# loop can handle both without a special case in run_compliance.py.
+- name: Collect switch configuration for compliance audit
+  hosts: switches
+  gather_facts: false
+  become: false
+  tasks:
+    # The docker test devices live on a macvlan that the controller cannot
+    # reach directly (host <-> macvlan child needs a gateway). Read their real
+    # config through `docker exec` instead of SSH - it is still the running
+    # configuration of that device, not a made-up snapshot.
+    - name: Read switch SNMP and identity configuration from its container
+      ansible.builtin.shell: |
+        echo "# hostname"
+        docker exec {{ inventory_hostname }} sh -c 'hostname' 2>/dev/null || true
+        echo "# snmpd.conf"
+        docker exec {{ inventory_hostname }} sh -c 'cat /etc/snmp/snmpd.conf' 2>/dev/null || true
+        echo "# interfaces"
+        docker exec {{ inventory_hostname }} sh -c 'ip -brief addr' 2>/dev/null || true
+      register: sw_config
+      changed_when: false
+      failed_when: sw_config.rc != 0
+
+    - name: Save switch configuration on Controller
+      ansible.builtin.copy:
+        content: "{{ sw_config.stdout }}\n"
+        dest: "{{ playbook_dir }}/../reports/actual/{{ inventory_hostname }}.conf"
+        mode: '0600'
+      delegate_to: localhost

@@ -564,9 +564,14 @@ input.lease-name:focus { border-style: solid; border-color: var(--accent); outli
 .op-kv b.ok { color: var(--ok); }
 .op-kv b.err { color: var(--err); }
 .op-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
-.op-table { width: 100%; font-size: 12px; }
-.op-table th { text-align: left; color: var(--muted); font-weight: 500; padding: 3px 5px; }
-.op-table td { padding: 3px 5px; border-top: 1px solid var(--line); }
+/* Node telemetry used to wrap "CPU" -> "CP/U", "RAM" -> "RA/M" and
+   "UPTIME" -> "UPTIM/E" in the narrow panel. Keep every header on one line;
+   if the panel is still too narrow the table scrolls sideways instead. */
+.op-table-wrap { overflow-x: auto; }
+.op-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+.op-table th { text-align: left; color: var(--muted); font-weight: 500; padding: 3px 5px;
+  white-space: nowrap; }
+.op-table td { padding: 3px 5px; border-top: 1px solid var(--line); white-space: nowrap; }
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
   background: var(--muted); margin-right: 5px; vertical-align: middle; }
 .dot.ok { background: var(--ok); }
@@ -657,3 +662,51 @@ input.lease-name:focus { border-style: solid; border-color: var(--accent); outli
 .cmp-chg { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 8px;
   font-size: 10.5px; letter-spacing: .02em; color: var(--warn);
   border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); }
+
+/* ---- v10: device-aware layout (phone vs PC) -----------------------------
+   The old `.shell { min-width:900px }` forced a desktop canvas. On a phone
+   that made every long word wrap at an arbitrary character, which is the
+   "chữ rớt dòng" symptom. Phone gets a real single-column canvas with
+   explicit ellipsis instead of wrapping; PC keeps the dense grid. */
+html.device-phone .shell { min-width: 0; width: 100%; }
+html.device-phone { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+html.device-phone .topbar,
+html.device-phone .side {
+  position: sticky; top: 0; z-index: 20;
+}
+html.device-phone .side {
+  width: 100%; height: auto; max-height: 44px; overflow-x: auto;
+  overflow-y: hidden; display: flex; flex-direction: row; align-items: center;
+  white-space: nowrap; -webkit-overflow-scrolling: touch;
+}
+html.device-phone .side a,
+html.device-phone .side button { flex: 0 0 auto; }
+html.device-phone .side .brand { flex: 0 0 auto; margin-right: 8px; }
+
+/* Every text-bearing cell: never break a word, truncate with ellipsis. */
+html.device-phone h1, html.device-phone h2, html.device-phone h3,
+html.device-phone .p-title, html.device-phone th, html.device-phone td,
+html.device-phone .stat-label, html.device-phone .pill,
+html.device-phone .chip, html.device-phone button, html.device-phone label {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+html.device-phone p, html.device-phone .muted {
+  overflow-wrap: anywhere; word-break: normal; hyphens: none;
+}
+
+html.device-phone .stat-grid,
+html.device-phone .dev-grid,
+html.device-phone .op-feed { grid-template-columns: 1fr !important; }
+html.device-phone .stat-grid .panel { grid-column: auto !important; }
+
+html.device-phone .op-table-wrap,
+html.device-phone .table-wrap,
+html.device-phone .log-table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+html.device-phone table { min-width: 0; }
+
+/* Touch targets large enough to actually tap. */
+html.device-phone button, html.device-phone .side a, html.device-phone input {
+  min-height: 40px;
+}
+html.device-pc .shell { min-width: 900px; }
