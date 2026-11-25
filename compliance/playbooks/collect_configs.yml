@@ -26,10 +26,14 @@
   gather_facts: false
   become: false
   tasks:
-    # The docker test devices live on a macvlan that the controller cannot
-    # reach directly (host <-> macvlan child needs a gateway). Read their real
-    # config through `docker exec` instead of SSH - it is still the running
-    # configuration of that device, not a made-up snapshot.
+    # These devices live on the `lab-users` macvlan. `docker exec` is used
+    # deliberately and is not a workaround for a broken network: the running
+    # config inside the container IS the device's real config, and reading it
+    # this way means the audit cannot be fooled by a stale copy on disk.
+    #
+    # The controller can now also reach them directly (the `mvl0` shim in
+    # files/sim/simctl.py), so SSH would work too - but these are containers
+    # running a bare `alpine` with no sshd, so there is nothing to SSH into.
     - name: Read switch SNMP and identity configuration from its container
       ansible.builtin.shell: |
         echo "# hostname"

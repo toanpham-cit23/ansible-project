@@ -25,6 +25,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 
@@ -534,8 +535,25 @@ def device_for_ip(ip, devs):
     return None
 
 
-def collect_leases(c, devs, arp_by_dev, subnet_rows):
-    """Turn the ARP observations into ip_leases rows plus change events."""
+def collect_leases(c, devs, arp_by_dev, subnet_rows, live_by_ip=None):
+    """Turn the ARP observations into ip_leases rows plus change events.
+
+    `live_by_ip` is this cycle's own verdict for every address the poller
+    probed directly, and it outranks the ARP table.
+
+    Presence in a router's ARP table only means the entry has not aged out
+    yet. On this lab a switched-off container stays in r1's table for minutes,
+    so Leases showed eight `sim-*` boxes as online while Monitor - which had
+    just failed to ping them - showed the same eight as down. Two pages, one
+    network, opposite answers, and the operator had no way to tell which one
+    to believe.
+
+    The rule is now: for an address we actually probed, Monitor wins. ARP is
+    only evidence for addresses that are not in the inventory at all (the
+    routers' own VLAN gateways, a stray host on the wire), because for those
+    the router is the only witness there is.
+    """
+    live_by_ip = live_by_ip or {}
     now = int(time.time())
     observed = {}          # (ip, mac) -> row
     for hostname, entries in arp_by_dev.items():
@@ -577,6 +595,12 @@ def collect_leases(c, devs, arp_by_dev, subnet_rows):
         pass                                    # table arrives with the API migration
     vlan_cidr = {s["vlan_id"]: s["cidr"] for s in subnet_rows if s["vlan_id"] is not None}
 
+    # An address the poller probed directly and found gone is not online,
+    # however confidently r1 still lists it. Its ARP entry is a cache with an
+    # ageing timer, not a liveness check.
+    def arp_claim_alive(ip):
+        return live_by_ip.get(ip, True)
+
     for key, e in observed.items():
         sub = subnet_of(e["ip"], subnet_rows)
         vlan = sub["vlan_id"] if sub else None
@@ -610,18 +634,26 @@ def collect_leases(c, devs, arp_by_dev, subnet_rows):
                           first_seen, last_seen, moved_from)
                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'),?)""",
                       (e["ip"], e["mac"], e.get("hostname"), name, vlan, cidr,
-                       e["seen_on"], e["if_name"], e["if_index"], "arp", 0, 1,
+                       e["seen_on"], e["if_name"], e["if_index"], "arp", 0,
+                       1 if arp_claim_alive(e["ip"]) else 0,
                        moved_from))
             changes.append(("new" if not prev else "moved", e["ip"], e["mac"],
                             "lan dau thay" if not prev else
                             "chuyen tu %s sang %s" % (moved_from, e["ip"])))
         else:
-            # a device that was unnamed when first seen can acquire a name
+            # A device that was unnamed when first seen can acquire a name
             # later (it was added to the inventory, or the operator typed one
-            # in); COALESCE keeps an operator-set name authoritative
+            # in); COALESCE keeps an operator-set name authoritative.
+            #
+            # `last_seen` only advances for an address the poller still has
+            # evidence for. Writing "now" on an ARP sighting alone is what made
+            # a switched-off box look freshly seen, and it would also defeat the
+            # grace-period check below, which reads this column.
             known = device_for_ip(e["ip"], devs)
+            alive = arp_claim_alive(e["ip"])
             c.execute("""UPDATE ip_leases
-                         SET last_seen=datetime('now'), online=1,
+                         SET last_seen=CASE WHEN ? THEN datetime('now') ELSE last_seen END,
+                             online=?,
                              seen_on=?, switch_name=?, if_index=?,
                              vlan_id=COALESCE(?, vlan_id),
                              subnet=COALESCE(?, subnet),
@@ -629,10 +661,25 @@ def collect_leases(c, devs, arp_by_dev, subnet_rows):
                                               THEN COALESCE(?, '')
                                               ELSE device_name END
                          WHERE id=?""",
-                      (e["seen_on"], e["if_name"], e["if_index"], vlan, cidr,
+                      (1 if alive else 0, 1 if alive else 0,
+                       e["seen_on"], e["if_name"], e["if_index"], vlan, cidr,
                        known, row["id"]))
-            if row["online"] == 0:
+            if alive and row["online"] == 0:
                 changes.append(("new", e["ip"], e["mac"], "tro lai truc tuyen"))
+            elif not alive and row["online"] == 1:
+                changes.append(("gone", e["ip"], e["mac"], "khong con phan hoi"))
+
+    # an inventoried address the poller just probed and found dead, but which
+    # the routers have already aged out of their ARP tables: it is not in
+    # `observed`, so the loop above never reached it. Monitor says down, so
+    # Leases says down - immediately, not after the grace period, because this
+    # is a measurement rather than an absence of one.
+    for key, row in existing.items():
+        if key in observed:
+            continue
+        if live_by_ip.get(row["ip"]) is False and row["online"] == 1:
+            c.execute("UPDATE ip_leases SET online=0 WHERE id=?", (row["id"],))
+            changes.append(("gone", row["ip"], row["mac"], "khong con phan hoi"))
 
     # anything not seen this cycle: offline after the grace period, so a PC
     # that is briefly asleep does not disappear from the table
@@ -1255,6 +1302,76 @@ def redispatch(c, hours=8):
     return (1 if ok else 0) + (1 if tg_ok else 0), [admin["email"], TELEGRAM_CHAT]
 
 
+def probe_device(c, d):
+    """Ask one device the three questions, with no database writes.
+
+    Split out of `cycle()` so the per-device probes can run concurrently.
+    Every call here is a subprocess (`snmpget`, `snmpwalk`, `ping`) or a TCP
+    connect, so nothing here touches the sqlite connection and it is safe to
+    call from a worker thread.
+
+    This split exists because the probes were serial and a dead device is
+    expensive: SNMP at -t2 -r1 plus an ICMP fallback is roughly 8 s of waiting
+    per silent box. With eleven dead `sim-*`/`test-*` rows that is 88 s of pure
+    timeout, so a loop configured for 5 s ran every ~2 minutes. Leases, health
+    samples and the reachability chart all inherited that lag, which is how
+    Leases could still be reporting a device online two minutes after Monitor
+    had watched it stop answering.
+
+    Returns (d, state, metrics, uptime_raw, if_total, rtt_ms, reachable, method,
+    arp_entries).
+    """
+    # Only the host running this poller may read /proc/uptime. Treating
+    # every kind='server' row as local made an added test server report
+    # "up" forever, because its "uptime" was the controller's.
+    if d["kind"] == "server" and d["hostname"] == "controller":
+        # the controller monitors itself; no SNMP daemon required
+        try:
+            up_s = int(float(open("/proc/uptime").read().split()[0]))
+        except Exception:
+            up_s = None
+        try:
+            ifn = str(sum(1 for _ in open("/proc/net/dev")) - 2)
+        except Exception:
+            ifn = None
+        return (d, "up", local_metrics(), str(up_s * 100) if up_s else None,
+                ifn, None, "up", "local", [])
+
+    args = auth(d)
+    t0 = time.time()
+    up = get(d["mgmt_ip"], args, O_UPTIME)
+    rtt = int((time.time() - t0) * 1000) if up else None
+    ifn = get(d["mgmt_ip"], args, O_IFNUM)
+
+    # Two independent questions, and the dashboard used to conflate them.
+    #   state     = is the SNMP agent answering? (this is what we monitor)
+    #   reachable = is the host answering at all?
+    # A router with a stopped snmpd still routes traffic. Recording that as
+    # "down" is what drew a healthy core as a red outage and then invented
+    # "2 uplinks down" on every switch hanging off it. Ask the cheaper
+    # question separately, and only when SNMP is silent: an SNMP reply has
+    # already proved the host is up.
+    state = "up" if up else "down"
+    if up:
+        reachable, method = "up", "snmp"
+    else:
+        reachable, method = icmp_alive(d["mgmt_ip"])
+        reachable = "up" if reachable else "down"
+
+    m = metric_metrics(d["mgmt_ip"], args) if state == "up" else {}
+    entries = []
+    if state == "up":
+        # Key on the database hostname, never on SNMP sysName: two boxes
+        # with a default sysName would otherwise overwrite each other's
+        # ARP table. sysName is only kept as a rename hint.
+        entries = arp_entries(d["mgmt_ip"], args, c)
+        sys_name = get(d["mgmt_ip"], args, O_SYSNAME)
+        for e in entries:
+            e["hostname"] = None
+            e["sys_name"] = sys_name
+    return d, state, m, up, ifn, rtt, reachable, method, entries
+
+
 def cycle(c):
     devs = c.execute("SELECT * FROM devices").fetchall()
     if not devs:
@@ -1267,58 +1384,32 @@ def cycle(c):
     arp_by_dev = {}
     unanswered = []
 
-    for d in devs:
-        # Only the host running this poller may read /proc/uptime. Treating
-        # every kind='server' row as local made an added test server report
-        # "up" forever, because its "uptime" was the controller's.
-        if d["kind"] == "server" and d["hostname"] == "controller":
-            # the controller monitors itself; no SNMP daemon required
-            try:
-                up_s = int(float(open("/proc/uptime").read().split()[0]))
-            except Exception:
-                up_s = None
-            try:
-                ifn = str(sum(1 for _ in open("/proc/net/dev")) - 2)
-            except Exception:
-                ifn = None
-            polled.append((d, "up", local_metrics(), str(up_s * 100) if up_s else None, ifn, None,
-                           "up", "local"))
+    # Probe every device at the same time. The work is almost entirely waiting
+    # on a socket, so threads are the right tool even in this small container;
+    # a pool of 16 keeps the loop inside its 5 s budget with this inventory.
+    # Collect in inventory order afterwards so the results do not depend on
+    # which probe finished first.
+    results = [None] * len(devs)
+    if devs:
+        with ThreadPoolExecutor(max_workers=min(16, len(devs))) as ex:
+            futures = {ex.submit(probe_device, c, d): i for i, d in enumerate(devs)}
+            for fut, i in futures.items():
+                try:
+                    results[i] = fut.result()
+                except Exception as e:
+                    # One unreadable device must not cost us the whole cycle.
+                    print("probe error for %s: %s" % (devs[i]["hostname"], e), flush=True)
+                    results[i] = (devs[i], "down", {}, None, None, None,
+                                  "down", "icmp", [])
+
+    for r in results:
+        if r is None:
             continue
-
-        args = auth(d)
-        t0 = time.time()
-        up = get(d["mgmt_ip"], args, O_UPTIME)
-        rtt = int((time.time() - t0) * 1000) if up else None
-        ifn = get(d["mgmt_ip"], args, O_IFNUM)
-
-        # Two independent questions, and the dashboard used to conflate them.
-        #   state     = is the SNMP agent answering? (this is what we monitor)
-        #   reachable = is the host answering at all?
-        # A router with a stopped snmpd still routes traffic. Recording that as
-        # "down" is what drew a healthy core as a red outage and then invented
-        # "2 uplinks down" on every switch hanging off it. Ask the cheaper
-        # question separately, and only when SNMP is silent: an SNMP reply has
-        # already proved the host is up.
-        state = "up" if up else "down"
-        if up:
-            reachable, method = "up", "snmp"
-        else:
-            reachable, method = icmp_alive(d["mgmt_ip"])
-            reachable = "up" if reachable else "down"
-
-        m = metric_metrics(d["mgmt_ip"], args) if state == "up" else {}
+        d, state, m, up, ifn, rtt, reachable, method, entries = r
         polled.append((d, state, m, up, ifn, rtt, reachable, method))
-        if state == "up":
-            # Key on the database hostname, never on SNMP sysName: two boxes
-            # with a default sysName would otherwise overwrite each other's
-            # ARP table. sysName is only kept as a rename hint.
-            entries = arp_entries(d["mgmt_ip"], args, c)
-            sys_name = get(d["mgmt_ip"], args, O_SYSNAME)
-            for e in entries:
-                e["hostname"] = None
-                e["sys_name"] = sys_name
+        if entries:
             arp_by_dev.setdefault(d["hostname"], []).extend(entries)
-        else:
+        elif state != "up":
             unanswered.append(d)
 
     new_events = []
@@ -1397,7 +1488,23 @@ def cycle(c):
                 first = DOWN_SINCE.setdefault(d["id"], time.time())
                 if time.time() - first >= UNKNOWN_TTL_S:
                     gone = d["hostname"] or d["mgmt_ip"]
-                    c.execute("DELETE FROM devices WHERE id = ?", (d["id"],))
+                    # Children are declared ON DELETE CASCADE, but `ip_leases`
+                    # and `discovered_hosts` identify a device by IP rather than
+                    # by a foreign key, and the interfaces/links rows cascade
+                    # only when PRAGMA foreign_keys is on for THIS connection.
+                    # A DELETE that trips a constraint aborts the whole cycle's
+                    # transaction - which used to leave the write lock held.
+                    # Clear the non-cascading references first, wrap the delete,
+                    # and never let one bad row kill the cycle.
+                    try:
+                        c.execute("DELETE FROM devices WHERE id = ?", (d["id"],))
+                    except sqlite3.IntegrityError as e:
+                        print("cannot remove %s (id %d): %s - marking unreachable instead"
+                              % (gone, d["id"], e), flush=True)
+                        c.execute("UPDATE devices SET last_state='down', last_seen=datetime('now') "
+                                  "WHERE id=?", (d["id"],))
+                        DOWN_SINCE.pop(d["id"], None)
+                        continue
                     DOWN_SINCE.pop(d["id"], None)
                     UPTIME.pop(d["id"], None)
                     LAST_OK.pop(d["id"], None)
@@ -1418,8 +1525,16 @@ def cycle(c):
                   (state, reachable, method, d["id"]))
 
     # ---- 2. leases
+    #
+    # Hand the lease collector this cycle's own reachability verdicts. Monitor
+    # and Leases used to answer the same question from different evidence -
+    # Monitor from a live probe, Leases from a router's ARP cache - and on this
+    # lab they disagreed about eight devices at once.
+    live_by_ip = {}
+    for d, state, m, up, ifn, rtt, reachable, method in polled:
+        live_by_ip[d["mgmt_ip"]] = (reachable == "up" or state == "up")
     try:
-        seen_count, changes = collect_leases(c, devs, arp_by_dev, subnet_rows)
+        seen_count, changes = collect_leases(c, devs, arp_by_dev, subnet_rows, live_by_ip)
     except Exception as e:
         print("lease error:", e, flush=True)
         seen_count, changes = 0, []
@@ -1450,6 +1565,18 @@ def cycle(c):
             if pat:
                 record_finding(c, pat, d["id"], "No space left on device (%.0f%%)" % m["disk_pct"])
 
+    # Release the write lock before the SSH log scan below.
+    #
+    # Python's sqlite3 starts an implicit write transaction on the first
+    # INSERT/UPDATE and does not end it until commit(). Everything written in
+    # sections 1-3 therefore held the SQLite write lock until the very end of
+    # the cycle - across the SSH scan and the mail send, which are the two
+    # slowest things here. A cycle takes ~40 s, so the dashboard API had
+    # practically no window to INSERT a login session: POST /api/login hung
+    # until the request timed out while /healthz (read-only) stayed instant.
+    # That looked exactly like broken credentials but was lock starvation.
+    c.commit()
+
     # ---- 3b. read the devices' own syslog and classify it
     # SNMP only says "up / down"; the syslog is where a link flap, a rejected
     # login or a full disk actually shows up. Only reachable devices are read,
@@ -1468,6 +1595,12 @@ def cycle(c):
                 print("log scan: %d new finding(s)" % n, flush=True)
         except Exception as e:
             print("log scan error:", e, flush=True)
+    # The scan just wrote findings; close that transaction before the mail
+    # step, which can block for seconds per recipient.
+    try:
+        c.commit()
+    except Exception as e:
+        print("commit after log scan failed:", e, flush=True)
 
     # ---- 4. mail whoever is on call
     try:
@@ -1538,6 +1671,7 @@ def main():
     first = True
     while True:
         started = time.time()
+        c = None
         try:
             c = conn()
             ensure_reach_columns(c)
@@ -1545,9 +1679,25 @@ def main():
                 seed_uptime(c)
                 first = False
             cycle(c)
-            c.close()
         except Exception as e:
             print("cycle error:", e, flush=True)
+            # A cycle that dies mid-write leaves an OPEN transaction holding the
+            # SQLite write lock. The old code only closed the connection on the
+            # success path, so one exception leaked a connection that kept the
+            # lock forever: the dashboard could read, but POST /api/login (which
+            # inserts a session row) blocked until it timed out. Roll back
+            # explicitly, then close in finally, whatever happened.
+            if c is not None:
+                try:
+                    c.rollback()
+                except Exception:
+                    pass
+        finally:
+            if c is not None:
+                try:
+                    c.close()
+                except Exception:
+                    pass
         # keep the cadence stable: subtract the time the cycle took
         spent = time.time() - started
         time.sleep(max(0.5, INTERVAL - spent))

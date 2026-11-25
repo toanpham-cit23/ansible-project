@@ -1,0 +1,29 @@
+# Line endings. The controller and every container run Linux, so a shell
+# script must reach them with LF. With core.autocrlf=true (the Windows
+# default) git stores LF in the blob but writes CRLF into the checkout, and
+# an SFTP upload of that checkout produced an init script that OpenRC could
+# not execute: "Failed executing /etc/init.d/lab-sim: No such file or
+# directory" — which reads as a missing file, not a bad byte.
+#
+# These rules pin the working copy to LF as well, so what is edited is what
+# is deployed.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.initd   text eol=lf
+*.service text eol=lf
+*.py      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.go      text eol=lf
+*.css     text eol=lf
+*.js      text eol=lf
+*.html    text eol=lf
+*.md      text eol=lf
+
+# Binary assets must not be touched at all.
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.gz   binary
+*.db   binary

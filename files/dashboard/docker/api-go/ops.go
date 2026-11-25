@@ -245,6 +245,20 @@ func handleOpsTelemetry(w http.ResponseWriter, r *http.Request, u *User) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+
+			// The controller is the machine running this container. Probing its
+			// own management IP over TCP/22 from inside a bridge network tests
+			// the container's routing, not the host's sshd - it always fails,
+			// which is why the controller showed "SSH down" while CPU, RAM and
+			// uptime were all present. Its SSH is up by definition: this
+			// process is talking to the host's docker daemon. Report it as
+			// "local" rather than inventing a failed probe.
+			if rows[idx].Hostname == "controller" {
+				rows[idx].SSH = true
+				rows[idx].SSHMs = 0
+				return
+			}
+
 			t0 := time.Now()
 			c, e := net.DialTimeout("tcp", net.JoinHostPort(rows[idx].IP, "22"), 700*time.Millisecond)
 			if e == nil {

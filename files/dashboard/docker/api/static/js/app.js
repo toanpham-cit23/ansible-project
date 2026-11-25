@@ -47,6 +47,142 @@ function confirmDialog(title, body, okText) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Interactive SSH terminal (Database view -> "Connect SSH")
+//
+// This is a real PTY, not the old allowlisted one-shot exec. xterm.js renders
+// the bytes and the server pumps them from an SSH channel over a WebSocket.
+// The credential never reaches the browser: only the session cookie
+// authorises the socket.
+// ---------------------------------------------------------------------------
+function openSshTerminal(id, hostname, ip) {
+  if (typeof Terminal !== 'function') {
+    toast('Terminal library did not load', true);
+    return;
+  }
+
+  const o = document.createElement('div');
+  o.className = 'overlay term-overlay';
+  o.innerHTML = `<div class="term-modal" role="dialog" aria-modal="true">
+    <div class="term-head">
+      <span class="term-dot"></span>
+      <b>${esc(hostname)}</b>
+      <span class="mono muted">${esc(ip)}</span>
+      <span class="term-status" data-status>connecting\u2026</span>
+      <span style="margin-left:auto"></span>
+      <button class="act term-close" data-close>Close</button>
+    </div>
+    <div class="term-body"><div class="term-x"></div></div>
+    <div class="term-foot mono muted" data-foot>SSH \u00b7 PTY 80\u00d724</div>
+  </div>`;
+  document.body.appendChild(o);
+
+  const body = o.querySelector('.term-body');
+  const statusEl = o.querySelector('[data-status]');
+  const footEl = o.querySelector('[data-foot]');
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    fontSize: 13,
+    scrollback: 3000,
+    theme: {
+      background: '#0b0e14', foreground: '#d7dce5', cursor: '#6ea8fe',
+      selectionBackground: '#2b3a55',
+    },
+  });
+  term.open(o.querySelector('.term-x'));
+
+  let fit = null;
+  if (window.FitAddon && window.FitAddon.FitAddon) {
+    fit = new window.FitAddon.FitAddon();
+    term.loadAddon(fit);
+  }
+
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${scheme}//${location.host}/api/ssh/session/${encodeURIComponent(id)}`;
+  let ws = null;
+  let closed = false;
+
+  const setStatus = (txt, bad) => {
+    statusEl.textContent = txt;
+    statusEl.className = 'term-status' + (bad ? ' bad' : '');
+  };
+
+  const doFit = () => {
+    if (!fit) return;
+    try {
+      fit.fit();
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      }
+      footEl.textContent = `SSH \u00b7 PTY ${term.cols}\u00d7${term.rows}`;
+    } catch (_) { /* the box may be hidden mid-close */ }
+  };
+
+  // The socket first, so a failure can be reported before xterm takes focus.
+  try {
+    ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+  } catch (err) {
+    setStatus('cannot open socket', true);
+    term.write(`\r\n\x1b[31mCannot open the terminal socket: ${err.message}\x1b[0m\r\n`);
+    return;
+  }
+
+  ws.onopen = () => {
+    setStatus('connected');
+    doFit();
+    term.focus();
+  };
+
+  ws.onmessage = (ev) => {
+    const data = typeof ev.data === 'string'
+      ? ev.data
+      : new Uint8Array(ev.data);
+    term.write(data);
+  };
+
+  ws.onerror = () => {
+    // The server closes with a reason when the SSH dial fails; onerror fires
+    // first, so keep the status honest without claiming a cause we do not know.
+    if (!closed) setStatus('connection error', true);
+  };
+
+  ws.onclose = (ev) => {
+    if (closed) return;
+    const why = ev.reason || '';
+    setStatus(why ? `closed: ${why}` : 'closed', true);
+    term.write(`\r\n\x1b[90m--- session ended${why ? ': ' + why : ''} ---\x1b[0m\r\n`);
+    footEl.textContent = 'session closed';
+  };
+
+  term.onData((d) => {
+    if (ws && ws.readyState === 1) ws.send(d);
+  });
+
+  // xterm needs a focusable box before it reports a size.
+  setTimeout(doFit, 30);
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    try { if (ws) ws.close(1000, 'client closed'); } catch (_) {}
+    try { term.dispose(); } catch (_) {}
+    o.remove();
+    window.removeEventListener('resize', doFit);
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+
+  o.addEventListener('click', (e) => {
+    if (e.target.closest('[data-close]')) close();
+    else if (e.target === o) close();
+  });
+  window.addEventListener('resize', doFit);
+  document.addEventListener('keydown', onKey);
+}
+
 // markTg paints the Telegram field red and writes the reason under it.
 function markTg(msg, bad) {
   const f = $('#sh-telegram');
@@ -452,20 +588,6 @@ async function onClick(e) {
     return;
   }
 
-  if (b.dataset.act === 'device-add') {
-    const name = (($('#nd-name') || {}).value || '').trim();
-    const ip = (($('#nd-ip') || {}).value || '').trim();
-    const kind = (($('#nd-kind') || {}).value || 'router');
-    if (!name) { toast('A name is required', true); return; }
-    if (!ip) { toast('No free address left in the pool', true); return; }
-    try {
-      await api.post('/api/devices', { hostname: name, mgmt_ip: ip, kind });
-      state.ndName = ''; state.ndIp = ''; state.ndKind = 'router';
-      toast('Node ' + name + ' added at ' + ip);
-      route();
-    } catch (err) { toast(err.message, true); }
-    return;
-  }
   if (b.dataset.act === 'device-delete') {
     const ok = await confirmDialog('Delete ' + (b.dataset.who || 'this device') + '?',
       'Xoá thiết bị khỏi danh mục. Đây là thiết bị chưa nhận diện được nên không có dữ liệu '
@@ -690,6 +812,48 @@ async function onClick(e) {
       route();
       toast('Saved');
     } catch (x) { toast(x.message, true); }
+    return;
+  }
+
+  // ---- Database view: reveal a stored password on demand ---------------
+  // The value is fetched only when the operator clicks, and it is written
+  // straight into the cell. Nothing is cached in state: a reload re-hides it.
+  if (b.dataset.act === 'pw-reveal') {
+    const cell = b.closest('.pw-cell');
+    const id = b.dataset.id;
+    if (cell.dataset.shown === '1') {
+      cell.dataset.shown = '0';
+      cell.innerHTML = `<button class="act pw-reveal" data-act="pw-reveal" data-id="${id}"
+        title="Show this device's password">\u2022\u2022\u2022\u2022\u2022\u2022</button>`;
+      return;
+    }
+    b.disabled = true;
+    b.textContent = '\u2026';
+    try {
+      const r = await api.get(`/api/devices/${id}/password`);
+      cell.dataset.shown = '1';
+      cell.innerHTML = `<span class="mono pw-plain">${esc(r.password || '')}</span>
+        <button class="act" data-act="pw-copy" data-pw="${esc(r.password || '')}"
+                title="Copy password" style="margin-left:6px;padding:2px 7px;font-size:11px">copy</button>
+        <button class="act" data-act="pw-reveal" data-id="${id}"
+                title="Hide" style="padding:2px 7px;font-size:11px">hide</button>`;
+    } catch (err) {
+      b.disabled = false;
+      b.textContent = '\u2022\u2022\u2022\u2022\u2022\u2022';
+      toast(err.message, true);
+    }
+    return;
+  }
+
+  if (b.dataset.act === 'pw-copy') {
+    try { await navigator.clipboard.writeText(b.dataset.pw || ''); toast('Password copied'); }
+    catch { toast('Clipboard blocked by the browser', true); }
+    return;
+  }
+
+  // ---- Database view: open a real SSH terminal -------------------------
+  if (b.dataset.act === 'ssh-open') {
+    openSshTerminal(b.dataset.id, b.dataset.host, b.dataset.ip);
     return;
   }
 
@@ -1643,14 +1807,25 @@ const views = {
           <div class="p-title">Node telemetry</div>
           <div class="op-table-wrap"><table class="op-table"><thead><tr>
             <th>Node</th><th>SSH</th><th>CPU</th><th>RAM</th><th>RTT</th><th>Uptime</th>
-          </tr></thead><tbody>${(tele.nodes || []).map((n) => `<tr>
+          </tr></thead><tbody>${(tele.nodes || []).map((n) => {
+            // The controller is this machine: its SSH probe cannot succeed from
+            // inside the container, so "down" there was a false alarm on a node
+            // that was simultaneously reporting CPU and RAM. Say "local".
+            const isLocal = n.hostname === 'controller';
+            const sshCell = isLocal
+              ? '<span class="dot ok"></span>local'
+              : (n.ssh_reachable
+                ? '<span class="dot ok"></span>up'
+                : '<span class="dot err"></span>down');
+            return `<tr>
             <td><b>${esc(n.hostname)}</b></td>
-            <td><span class="dot ${n.ssh_reachable ? 'ok' : 'err'}"></span>${n.ssh_reachable ? 'up' : 'down'}</td>
+            <td>${sshCell}</td>
             <td>${n.cpu_pct == null ? '—' : Math.round(n.cpu_pct) + '%'}</td>
             <td>${n.mem_pct == null ? '—' : Math.round(n.mem_pct) + '%'}</td>
             <td>${n.rtt_ms == null ? '—' : n.rtt_ms + ' ms'}</td>
             <td>${uptime(n.uptime_s)}</td>
-          </tr>`).join('')}</tbody></table></div>
+          </tr>`;
+          }).join('')}</tbody></table></div>
         </div>
       </div>
       <div class="panel op" style="margin-top:9px">
@@ -1693,15 +1868,12 @@ const views = {
 
   async monitoring() {
     const admin = state.me.role === 'admin';
-    const [t, ld, pool] = await Promise.all([
+    const [t, ld] = await Promise.all([
       api.get('/api/topology'),
       // every lease, not only the online ones: a terminated host is offline by
       // definition, and filtering here would erase the very state the diagram
       // is supposed to show
       api.get('/api/leases?limit=300').catch(() => ({ leases: [] })),
-      // Free addresses for the "add a node" form. Read-only and cheap; only an
-      // admin sees the form, but a viewer's page should not 403 in the console.
-      api.get('/api/devices/pool').catch(() => ({ ips: [] })),
     ]);
     const built = labTopology(t, (ld && ld.leases) || []);
     state.topoIssues = built.issues;
@@ -1758,30 +1930,11 @@ const views = {
           : '<path d="M8 4.1v4.5" class="ix-mark"/><circle cx="8" cy="11.3" r=".95" class="ix-mark-f"/>'}
         </svg></button>`;
 
-    const nodes = `${admin ? `<div class="panel" style="margin-bottom:9px;padding:11px 13px">
-      <div class="p-title" style="text-align:left;margin-bottom:8px">Add a node</div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:9px">
-        <label class="muted" style="font-size:12px">Name<br>
-          <input id="nd-name" placeholder="lab-pc-01" autocomplete="off"
-                 style="width:100%;margin-top:4px" value="${esc(state.ndName || '')}"></label>
-        <label class="muted" style="font-size:12px">Address<br>
-          <select id="nd-ip" style="width:100%;margin-top:4px">
-            ${(pool.ips || []).map((ip) => `<option value="${ip}"${ip === state.ndIp ? ' selected' : ''}>${ip}</option>`).join('') || '<option value="">no free address</option>'}
-          </select></label>
-        <label class="muted" style="font-size:12px">Class<br>
-          <select id="nd-kind" style="width:100%;margin-top:4px">
-            ${['router', 'switch', 'l3switch'].map((k) =>
-              `<option value="${k}"${(state.ndKind || 'router') === k ? ' selected' : ''}>${k}</option>`).join('')}
-          </select></label>
-      </div>
-      <div class="row" style="margin-top:10px;justify-content:flex-end">
-        <button class="act primary" data-act="device-add">Add node</button>
-      </div>
-      <p class="muted" style="font-size:11.5px;margin-top:7px">
-        ${esc(pool.note || '')} Thêm node mô phỏng thiết bị ngoài; node chưa từng trả lời sẽ
-        hiện dấu hỏi vàng và bị xoá sau 180 giây nếu không phản hồi.
-      </p>
-    </div>` : ''}<div class="panel"><table>
+    // The "Add a node" form used to sit above this table. It created a row
+    // that only ever answered ICMP, so it showed a yellow question mark and
+    // was deleted again after 180 s - a form that mostly produced clutter.
+    // Devices are added from the Database view, which writes a real row.
+    const nodes = `<div class="panel"><table>
       <thead><tr><th>Host</th><th>Address</th><th>Class</th><th>State</th><th></th><th></th><th></th></tr></thead>
       <tbody>${t.nodes.map((n) => {
         const issue = built.issues['dev:' + n.id];
@@ -2698,10 +2851,15 @@ const views = {
         <td>${esc(s.kind)}</td>
         <td class="mono">${esc(s.username || '\u2014')}</td>
         <td class="mono">${esc(String(s.port || 22))}</td>
-        <td>${s.has_credential
-          ? '<span class="chip chip-ok">stored</span>'
+        <td class="pw-cell" data-id="${s.id}">${s.has_credential
+          ? `<button class="act pw-reveal" data-act="pw-reveal" data-id="${s.id}"
+                     title="Show this device's password">\u2022\u2022\u2022\u2022\u2022\u2022</button>`
           : '<span class="chip chip-warn">none</span>'}</td>
-      </tr>`).join('') || `<tr><td colspan="6" class="muted" style="text-align:center;padding:14px">
+        <td style="text-align:right">${s.has_credential
+          ? `<button class="act primary" data-act="ssh-open" data-id="${s.id}"
+                     data-host="${esc(s.hostname)}" data-ip="${esc(s.ip)}">Connect SSH</button>`
+          : '<span class="muted" style="font-size:11.5px">set a credential first</span>'}</td>
+      </tr>`).join('') || `<tr><td colspan="7" class="muted" style="text-align:center;padding:14px">
         No devices with SSH access yet.</td></tr>`;
 
     const propRows = props.length ? props.map((p) => `
@@ -2764,7 +2922,8 @@ const views = {
         </div>
         <div class="panel" style="padding:4px 8px">
           <div class="op-table-wrap"><table class="op-table ssh-pool"><thead><tr>
-            <th>Device</th><th>Address</th><th>Kind</th><th>User</th><th>Port</th><th>Credential</th>
+            <th>Device</th><th>Address</th><th>Kind</th><th>User</th><th>Port</th>
+            <th>Password</th><th></th>
           </tr></thead><tbody>${sshPoolRows}</tbody></table></div>
         </div>
       </div>

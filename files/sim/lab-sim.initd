@@ -23,6 +23,14 @@ depend() {
 	after docker
 }
 
+# The host-side macvlan shim has to exist before the poller's first cycle, not
+# when someone remembers to recreate it. Without it every simulated PC answers
+# its routers but not the controller, so Monitor reports eight healthy
+# containers as an outage - and after a reboot that is exactly what the
+# dashboard showed. `shim` is idempotent, so calling it on every start is safe.
 start_pre() {
 	checkpath --file --mode 0644 /var/log/lab-sim.log
+	/usr/bin/python3 /root/lab-sim/simctl.py shim >>/var/log/lab-sim.log 2>&1 || \
+		echo "warning: macvlan shim not installed - Monitor will not see sim-* hosts" \
+			>>/var/log/lab-sim.log
 }

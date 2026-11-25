@@ -103,6 +103,63 @@ def ensure_network(verbose=True):
            "--ip-range", IPRANGE, "-o", "parent=" + PARENT, NETWORK)
 
 
+# ------------------------------------------------------------- host shim
+#
+# A macvlan child is a *sibling* of the host NIC, not a child of it. The parent
+# interface cannot reach the containers it hosts: the kernel sends the frame
+# out of eth0, the destination MAC belongs to the child, and it never comes
+# back. So the controller could not ping, snmpget or ssh the eight workstations
+# it had just created, and Monitor drew all of them as an outage while Leases
+# - reading the routers' ARP tables - still called them online.
+#
+# That disagreement was the bug the operator noticed. The fix is the standard
+# one: a second macvlan interface on the same parent in bridge mode. It is a
+# sibling, so traffic to a child leaves by it and arrives normally.
+SHIM_DEV = os.environ.get("SIM_SHIM_DEV", "mvl0")
+SHIM_IP = os.environ.get("SIM_SHIM_IP", "192.168.23.200/32")
+
+
+def shim_routes():
+    """Addresses the host must reach through the shim.
+
+    The configured macvlan range plus any extra prefixes (the test devices sit
+    outside the range because they predate it).
+    """
+    extra = os.environ.get("SIM_SHIM_EXTRA", "192.168.23.51/32 192.168.23.52/32 192.168.23.53/32")
+    return [IPRANGE] + [e for e in extra.split() if e]
+
+
+def ensure_shim(verbose=True):
+    """Create the host-side macvlan interface. Idempotent.
+
+    Called from `up` and from the boot service, so a reboot cannot leave the
+    lab monitored-but-unreachable - which is exactly how it looked before.
+    """
+    have = sh(["ip", "link", "show", SHIM_DEV], check=False, capture=True)
+    if have.returncode != 0:
+        if verbose:
+            print("creating shim %s on %s (macvlan bridge)" % (SHIM_DEV, PARENT))
+        r = sh(["ip", "link", "add", SHIM_DEV, "link", PARENT,
+                "type", "macvlan", "mode", "bridge"], check=False)
+        if r.returncode != 0:
+            # Not fatal: without it the lab is monitored from the routers only.
+            print("warning: could not create %s: %s" % (SHIM_DEV, (r.stderr or "").strip()))
+            return False
+
+    addr = sh(["ip", "addr", "show", SHIM_DEV], check=False).stdout
+    if SHIM_IP.split("/")[0] not in addr:
+        sh(["ip", "addr", "add", SHIM_IP, "dev", SHIM_DEV], check=False)
+    sh(["ip", "link", "set", SHIM_DEV, "up"], check=False)
+
+    routes = sh(["ip", "route", "show"], check=False).stdout
+    for cidr in shim_routes():
+        if ("%s dev %s" % (cidr, SHIM_DEV)) not in routes:
+            sh(["ip", "route", "add", cidr, "dev", SHIM_DEV], check=False)
+    if verbose:
+        print("shim ready: %s %s" % (SHIM_DEV, SHIM_IP))
+    return True
+
+
 def owned():
     """Every container this tool created, by label.
 
@@ -122,6 +179,8 @@ def restart_policy(cname):
 
 def cmd_up(args):
     ensure_network()
+    # Without this the hosts come up and the dashboard cannot see them.
+    ensure_shim()
     todo = HOSTS[:args.count] if args.count else HOSTS
     expected = {container(h[0]) for h in todo}
     have = running()
@@ -249,6 +308,21 @@ def cmd_status(args):
     if seen < len(have & {container(h[0]) for h in HOSTS}):
         print("containers that are up but not yet leased: the routers learn them on the next poll")
 
+    # Say whether the host can reach its own children. Without the shim every
+    # lease above can be held while Monitor shows the same host as down, and
+    # that contradiction is invisible unless it is printed.
+    probe = sh(["ip", "link", "show", SHIM_DEV], check=False)
+    if probe.returncode != 0:
+        print("\nwarning: no %s shim - this host cannot reach its own macvlan "
+              "containers.\n         Monitor will show them as down. Run: "
+              "python3 %s shim" % (SHIM_DEV, sys.argv[0]))
+    else:
+        down = [ip for _s, _n, _v, _m, ip in HOSTS
+                if sh(["ping", "-c", "1", "-W", "2", ip], check=False).returncode != 0]
+        if down:
+            print("\nwarning: shim present but %d address(es) do not answer: %s"
+                  % (len(down), " ".join(down)))
+
 
 def cmd_names(args):
     jar = login()
@@ -331,6 +405,10 @@ def main():
 
     st = sub.add_parser("status", help="containers vs leases")
     st.set_defaults(fn=cmd_status)
+
+    sh_ = sub.add_parser("shim", help="(re)create the host macvlan shim so this "
+                                     "host can reach its own containers")
+    sh_.set_defaults(fn=lambda a: ensure_shim())
 
     nm = sub.add_parser("names", help="copy the friendly names into the lease table")
     nm.set_defaults(fn=cmd_names)

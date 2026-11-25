@@ -125,6 +125,70 @@ def file_texts(rel):
     return texts
 
 
+def _is_script(path):
+    """True when the file declares a shell shebang.
+
+    The extension list is not enough: this repo has runnable scripts with no
+    extension at all, and a CRLF shebang in one of those is the worst case -
+    the kernel cannot even find the interpreter.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(64)
+    except OSError:
+        return False
+    return head.startswith(b"#!") and (b"sh" in head.split(b"\n")[0])
+
+
+def css_layout_problems(css):
+    """Layout invariants that have already caused a shipped regression.
+
+    The phone shell broke twice the same way: a rule made the sidebar full
+    width without also stacking `.shell`, so `<main>` kept only its padding
+    (18 px measured live) and headings wrapped one character per line. A
+    second version fixed the shell but left the 44 px strip in `column`
+    direction, which squeezed the nav to height 0 and hid the menu.
+
+    Returns a list of (path, why) tuples; empty means the invariants hold.
+    """
+    flat = " ".join(css.split())        # collapse indentation and newlines
+    # A rule's body, with "{" and ";" spacing normalised, so the checks do not
+    # depend on how the file happens to be indented.
+    flat = flat.replace("{ ", "{").replace(" ;", ";")
+    out = []
+
+    sidebar_full = ".side {width: 100%; max-width: 100%;" in flat
+    # Any `html.device-phone .shell { ... }` rule may supply the column
+    # direction; earlier ones (v10) only set min-width, so scan them all.
+    shell_column = any(
+        "flex-direction: column" in body[:200]
+        for body in flat.split("html.device-phone .shell {")[1:]
+    )
+    if sidebar_full and not shell_column:
+        out.append(("files/dashboard/docker/api/static/css/app.css",
+                    "phone sidebar is full width but .shell is not a column - "
+                    "<main> collapses to its padding"))
+
+    strip_fixed = "height: 44px; max-height: 44px;" in flat
+    # Likewise: any rule with the fixed strip height may set the row direction.
+    strip_row = any(
+        "flex-direction: row" in body[:300]
+        for body in flat.split("height: 44px; max-height: 44px;")[1:]
+    )
+    if strip_fixed and not strip_row:
+        out.append(("files/dashboard/docker/api/static/css/app.css",
+                    "phone .side strip has a fixed height without "
+                    "flex-direction: row - the nav collapses to 0 px"))
+
+    if ".op-kv span" in flat:
+        after = flat.split(".op-kv span")[-1][:200]
+        if "white-space: nowrap" not in after:
+            out.append(("files/dashboard/docker/api/static/css/app.css",
+                        ".op-kv span may wrap - labels such as Inventory break "
+                        "into one word per line"))
+    return out
+
+
 def main():
     sec = secrets()
     paths = staged_paths()
@@ -136,9 +200,47 @@ def main():
             # One report per file even when the value appears in both the
             # index blob and the working tree (or in several lines).
             leaks.append((rel, "live secret value"))
+
+    # Line endings are not a style question here. These scripts land on Alpine
+    # and are run by sh, OpenRC and systemd; a CRLF shebang or a CRLF `case`
+    # statement fails at runtime, not at review, and the failure looks like a
+    # missing file rather than a bad byte. That already cost one debugging
+    # cycle: an init script uploaded over SFTP ran perfectly from bash on the
+    # workstation and made OpenRC report "Failed executing /etc/init.d/...".
+    crlf = []
+    for rel in paths:
+        p = os.path.join(REPO, rel)
+        if not (rel.endswith((".sh", ".initd", ".service")) or
+                rel.endswith("/" + os.path.basename(rel)) and _is_script(p)):
+            continue
+        try:
+            with open(p, "rb") as fh:
+                if b"\r\n" in fh.read():
+                    crlf.append(rel)
+        except OSError:
+            pass
+
+    layout = []
+    css_rel = "files/dashboard/docker/api/static/css/app.css"
+    if css_rel in paths:
+        try:
+            css = open(os.path.join(REPO, css_rel), encoding="utf-8").read()
+            layout = css_layout_problems(css)
+        except OSError:
+            pass
+
     print(f"pre-push audit: {len(paths)} files, {len(sec)} secret values checked")
     if leaks:
         for rel, why in leaks:
+            print(f"  BLOCKED {rel}: {why}")
+        sys.exit(1)
+    if crlf:
+        for rel in crlf:
+            print(f"  BLOCKED {rel}: CRLF line endings in a script that runs on Linux")
+        print("  fix with: sed -i 's/\\r$//' <file>")
+        sys.exit(1)
+    if layout:
+        for rel, why in layout:
             print(f"  BLOCKED {rel}: {why}")
         sys.exit(1)
     if not paths:

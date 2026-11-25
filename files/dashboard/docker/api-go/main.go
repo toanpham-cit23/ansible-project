@@ -428,9 +428,23 @@ func handleMe(w http.ResponseWriter, r *http.Request, u *User) {
 }
 
 func handleSummary(w http.ResponseWriter, r *http.Request, u *User) {
-	rows, err := db.Query(`SELECT effective_kind, COUNT(*),
-	                              SUM(last_state='up'), SUM(last_state='down')
-	                       FROM v_inventory GROUP BY effective_kind`)
+	// "down" here must mean what the Monitor page means by it, or the two
+	// disagree the moment a device answers ICMP without answering SNMP.
+	//
+	// last_state is the SNMP verdict; last_reachable is the host verdict. A
+	// box that pings but has no agent is `state=down, reach=up`, and counting
+	// that as an outage is how eleven healthy containers were reported as a
+	// red outage. It is reachable-and-unmonitored, so it is counted separately
+	// and not as down.
+	// last_reachable lives on `devices`, not on the view, so it has to be
+	// joined in rather than selected from v_inventory.
+	rows, err := db.Query(`SELECT v.effective_kind, COUNT(*),
+	                              SUM(v.last_state='up'),
+	                              SUM(COALESCE(d.last_reachable,'')='up' AND v.last_state<>'up'),
+	                              SUM(COALESCE(d.last_reachable,'')<>'up' AND v.last_state<>'up')
+	                       FROM v_inventory v
+	                       LEFT JOIN devices d ON d.id = v.id
+	                       GROUP BY v.effective_kind`)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, err.Error())
 		return
@@ -439,9 +453,12 @@ func handleSummary(w http.ResponseWriter, r *http.Request, u *User) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var kind string
-		var n, up, down sql.NullInt64
-		if rows.Scan(&kind, &n, &up, &down) == nil {
-			out = append(out, map[string]any{"kind": kind, "n": n.Int64, "up": up.Int64, "down": down.Int64})
+		var n, up, blind, down sql.NullInt64
+		if rows.Scan(&kind, &n, &up, &blind, &down) == nil {
+			out = append(out, map[string]any{
+				"kind": kind, "n": n.Int64, "up": up.Int64,
+				"blind": blind.Int64, "down": down.Int64,
+			})
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -1238,6 +1255,10 @@ func main() {
 	mux.HandleFunc("GET /api/compliance/device", withUser(handleComplianceDevice))
 	mux.HandleFunc("GET /api/devices", withUser(handleDevices))
 	mux.HandleFunc("GET /api/ssh/pool", withUser(handleSSHPool))
+	// Interactive terminal for the Database view. WebSocket, admin only.
+	mux.HandleFunc("GET /api/ssh/session/{id}", withAdmin(handleSSHSession))
+	// Reveal one device's password on demand (demo use). Admin only, logged.
+	mux.HandleFunc("GET /api/devices/{id}/password", withAdmin(handleDevicePassword))
 	mux.HandleFunc("PATCH /api/devices/{id}", withAdmin(handlePatchDevice))
 	mux.HandleFunc("PUT /api/devices/{id}/credentials", withAdmin(handleCredentials))
 	mux.HandleFunc("GET /api/devices/{id}/health", withUser(handleDeviceHealth))

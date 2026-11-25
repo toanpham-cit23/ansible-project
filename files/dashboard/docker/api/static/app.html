@@ -6,16 +6,46 @@
 <meta name="format-detection" content="telephone=no">
 <title>Lab</title>
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/static/css/app.css?v=40">
+<link rel="stylesheet" href="/static/css/app.css?v=43">
+<!-- xterm.js is vendored, not loaded from a CDN: the lab is often offline and a
+     terminal that needs the internet to render is not a terminal. -->
+<link rel="stylesheet" href="/static/vendor/xterm.css">
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/vendor/addon-fit.js"></script>
 <!-- Classify the device BEFORE first paint so the phone layout never flashes
-     a desktop-width page. Touch + narrow viewport = phone; pointer + wide = PC. -->
+     a desktop-width page. Phone = coarse pointer AND a narrow viewport.
+     The viewport test must use window.innerWidth, because that is the number
+     CSS media queries use. The old test used Math.min(innerWidth, screen.width),
+     so a wide desktop window on a machine reporting a small screen.width was
+     classified as a phone: a 1476 px session got the phone shell, which then
+     collapsed <main> to 18 px and wrapped every heading one character per line. -->
 <script>
 (function () {
-  var touch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
-  var narrow = Math.min(window.innerWidth, window.screen.width) <= 820;
-  var phone = touch && narrow;
+  var coarse = false;
+  try {
+    coarse = window.matchMedia('(pointer: coarse)').matches ||
+             window.matchMedia('(hover: none)').matches;
+  } catch (e) {
+    coarse = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+  }
+  var wide = window.innerWidth > 820;
+  var phone = coarse && !wide;
+  if (wide) phone = false;      // a wide viewport always gets the desktop shell
   document.documentElement.classList.add(phone ? 'device-phone' : 'device-pc');
   document.documentElement.dataset.input = phone ? 'touch' : 'pointer';
+  window.__labIsPhone = function () { return window.innerWidth <= 820; };
+  /* Rotating a phone or dragging a desktop window across the 820 px line must
+     re-classify, otherwise the page keeps a layout that no longer matches the
+     viewport it is in. */
+  var last = phone;
+  window.addEventListener('resize', function () {
+    var now = window.innerWidth <= 820;
+    if (now === last) return;
+    last = now;
+    var root = document.documentElement;
+    root.classList.toggle('device-phone', now);
+    root.classList.toggle('device-pc', !now);
+  }, { passive: true });
 })();
 </script>
 </head>

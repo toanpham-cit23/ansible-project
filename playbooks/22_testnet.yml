@@ -52,6 +52,21 @@
       ansible.builtin.debug:
         var: testnet_up.stdout_lines
 
+    # Without this the controller cannot reach the containers it just created,
+    # and Monitor reports every one of them as an outage while Leases - reading
+    # the routers' ARP tables - still calls them online. `testnet.sh up` calls
+    # install_shim itself; this is the belt to that braces, because the playbook
+    # may run against devices created by an earlier run.
+    - name: Confirm the macvlan shim reaches every test device
+      ansible.builtin.shell: "{{ testnet_dir }}/testnet.sh status"
+      register: testnet_status
+      changed_when: false
+      failed_when: "'UNREACHABLE' in testnet_status.stdout"
+
+    - name: Show reachability
+      ansible.builtin.debug:
+        var: testnet_status.stdout_lines
+
     # Password encryption must go through the app's own endpoint. Earlier we
     # tried seeding password_enc with Python's cryptography package; version
     # 47.0.0 on this Alpine host fails even a trivial AESGCM roundtrip, which

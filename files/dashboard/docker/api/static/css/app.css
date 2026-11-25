@@ -557,10 +557,23 @@ input.lease-name:focus { border-style: solid; border-color: var(--accent); outli
 .panel.op { padding: 11px 13px; }
 .op .p-title { margin-bottom: 8px; }
 .op-kv { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0;
-  font-size: 12.5px; border-bottom: 1px dashed var(--line); }
+  font-size: 12.5px; border-bottom: 1px dashed var(--line);
+  /* Labels and values sit on the same baseline even when the value wraps. */
+  align-items: baseline; }
 .op-kv:last-of-type { border-bottom: 0; }
-.op-kv span { color: var(--muted); flex: 0 0 auto; }
-.op-kv b { font-weight: 600; text-align: right; word-break: break-word; }
+/* The key is a label, never prose: it must stay on one line. It also had to
+   be told not to shrink — with `flex: 0 0 auto` alone it was still being
+   squeezed by a long value beside it, and "Inventory" broke into five
+   one-word fragments inside a 52 px column. */
+.op-kv span {
+  color: var(--muted); flex: 0 0 auto;
+  white-space: nowrap; overflow-wrap: normal; word-break: normal;
+}
+/* The value gets the remaining width and is the only half allowed to wrap. */
+.op-kv b {
+  font-weight: 600; text-align: right; word-break: break-word;
+  flex: 1 1 auto; min-width: 0;
+}
 .op-kv b.ok { color: var(--ok); }
 .op-kv b.err { color: var(--err); }
 .op-actions { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
@@ -710,3 +723,214 @@ html.device-phone button, html.device-phone .side a, html.device-phone input {
   min-height: 40px;
 }
 html.device-pc .shell { min-width: 900px; }
+
+/* ---- v11: interactive SSH terminal modal -------------------------------
+   The terminal is a full-height sheet rather than a centred dialog: a shell
+   needs every line it can get, and a phone needs it to reach the edges. */
+.term-overlay { display: flex; align-items: stretch; justify-content: center; padding: 0; }
+.term-modal {
+  display: flex; flex-direction: column;
+  width: min(1100px, 100%); height: 100%;
+  background: #0b0e14;
+  border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+}
+.term-head {
+  display: flex; align-items: center; gap: 9px; flex-wrap: nowrap;
+  padding: 9px 13px; background: var(--panel); border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.term-head b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.term-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: 0 0 auto; }
+.term-status { font-size: 11.5px; color: var(--ok); white-space: nowrap; }
+.term-status.bad { color: var(--err); }
+.term-close { flex: 0 0 auto; }
+.term-body { flex: 1; min-height: 0; padding: 6px 4px 4px 8px; overflow: hidden; }
+.term-x { width: 100%; height: 100%; }
+.term-foot { padding: 5px 12px 8px; font-size: 11px; border-top: 1px solid #1b2130; }
+
+/* The xterm canvas is sized by FitAddon; make sure the wrapper can shrink. */
+.term-x .xterm { height: 100%; }
+.term-x .xterm-viewport { overflow-y: auto !important; }
+
+/* Phone: no side borders, tighter header. */
+html.device-phone .term-modal { width: 100%; border-left: 0; border-right: 0; }
+html.device-phone .term-head { padding: 7px 10px; gap: 6px; }
+html.device-phone .term-head .mono { display: none; }
+html.device-phone .term-body { padding: 4px 2px 2px 5px; }
+html.device-phone .term-foot { display: none; }
+
+/* Password cell: the revealed value must never wrap into a sliver. */
+.pw-cell .pw-plain { white-space: nowrap; }
+.pw-cell .pw-reveal { font-family: ui-monospace, monospace; letter-spacing: .06em; }
+
+/* ---- v12: phone layout, take two ---------------------------------------
+   v10 added a phone class but the grid that actually breaks on a phone was
+   never touched: `.grid3` is a hard 3-column track, so on a 360 px screen
+   each column is ~110 px and "CPU" / "Memory" / "Disk" get split one letter
+   per line ("C p e co r1 r2 r3"). That is the "chữ rớt dòng" the operator
+   sees. Same for the device cards, which are laid out 3-up by auto-fill.
+
+   These rules are deliberately duplicated under a media query as well as the
+   .device-phone class: if the JS classifier is ever blocked or the class is
+   stripped by a proxy, a narrow screen must still get a usable layout. */
+
+html.device-phone .grid3,
+html.device-phone .grid,
+html.device-phone .op-grid,
+html.device-phone .cmp-wrap {
+  grid-template-columns: 1fr !important;
+}
+
+/* Device cards: one per row. auto-fit with a 190 px minimum produced three
+   60 px columns inside a 360 px viewport. */
+html.device-phone .dev-grid {
+  grid-template-columns: 1fr !important;
+}
+
+/* Stat panels span-2 rule from v7 would overflow a single column. */
+html.device-phone .stat-grid .panel { grid-column: auto !important; }
+
+/* The scope row is a run of buttons; let it scroll instead of compressing. */
+html.device-phone .row.scope {
+  flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  padding-bottom: 3px;
+}
+html.device-phone .row.scope .act { flex: 0 0 auto; }
+
+/* Tables: allow horizontal scroll, and stop cells breaking mid-word. The
+   global `#view td { overflow-wrap: anywhere }` is what turned an IP into
+   "192.168" / ".23.155" and a hostname into "sim-" / "accounting". */
+html.device-phone .op-table-wrap,
+html.device-phone .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+html.device-phone #view td,
+html.device-phone #view th {
+  overflow-wrap: normal; word-break: normal; white-space: nowrap;
+}
+html.device-phone #view table { width: auto; min-width: 100%; }
+
+/* Charts get a fixed height; a canvas at 100% of a collapsed grid is 0 px. */
+html.device-phone .chart-wrap { height: 150px; }
+html.device-phone .chart { height: 150px !important; }
+
+/* Sidebar became a horizontal strip; the content must start below it. */
+html.device-phone .main { padding: 9px 9px 40px; }
+
+/* Same guarantees without the JS class, for narrow screens. */
+@media (max-width: 820px) {
+  .grid3, .grid, .op-grid, .cmp-wrap { grid-template-columns: 1fr !important; }
+  .dev-grid { grid-template-columns: 1fr !important; }
+  .stat-grid { grid-template-columns: 1fr !important; }
+  .stat-grid .panel { grid-column: auto !important; }
+  .shell { min-width: 0 !important; flex-direction: column; }
+  .side {
+    width: 100%; max-width: 100%; height: 44px; max-height: 44px;
+    border-right: 0; border-bottom: 1px solid var(--line); overflow: hidden;
+    /* The strip itself must be a ROW. Leaving it column with a 44 px height
+       pushed the nav to height 0, so the menu vanished on a phone. */
+    flex-direction: row; align-items: center;
+  }
+  .side .brand { padding: 0 10px 0 12px; font-size: 13px; flex: 0 0 auto; }
+  .side nav {
+    flex: 1 1 auto; min-width: 0; min-height: 0;
+    flex-direction: row; align-items: center;
+    gap: 2px; padding: 0 4px; overflow-x: auto; overflow-y: hidden;
+  }
+  .side nav a, .side .logout, .side button { width: auto; flex: 0 0 auto; }
+  .side .toggle { display: none; }
+  .main { flex: 1 1 auto; width: 100%; min-width: 0; padding: 9px 9px 40px; }
+  .top { flex-wrap: wrap; gap: 8px; }
+  .ranges { width: 100%; }
+  #view td, #view th { overflow-wrap: normal; word-break: normal; }
+  .op-table-wrap, .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+}
+
+/* ---- v13: the phone shell is a COLUMN, not a row -----------------------
+   THE bug behind "chữ rớt dòng" on every view. v10 rebuilt the sidebar as a
+   horizontal strip with `width: 100%`, but `.shell` kept `display: flex` in
+   its default ROW direction. A 100%-wide first child of a row flex container
+   consumes the whole line, so `.main` was squeezed down to its own padding
+   floor (9 px + 9 px = 18 px measured live) and every heading wrapped one
+   character per line — "19 online of 23 addresses known" rendered as a
+   9 px wide, 484 px tall column. The sidebar is a header bar now; the shell
+   must stack, and `.main` must be allowed to be full width.
+
+   `.side nav` also stayed `flex-direction: column` inside the new 44 px
+   strip, so the links stacked vertically and were clipped by `overflow-y:
+   hidden`. It has to become a row as well. */
+
+html.device-phone .shell {
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+
+html.device-phone .side {
+  flex: 0 0 auto;
+  width: 100%; max-width: 100%;
+  height: 44px; max-height: 44px;
+  border-right: 0; border-bottom: 1px solid var(--line);
+  overflow: hidden;          /* only the nav scrolls, never the whole bar */
+  /* Row, not column: with the base `flex-direction: column` and a fixed
+     44 px height, the nav was compressed to height 0 and the menu vanished. */
+  flex-direction: row;
+  align-items: center;
+}
+
+/* The base `.brand` padding (18px 18px 12px) makes the bar 56 px tall on its
+   own and pushes the strip past its 44 px cap. */
+html.device-phone .side .brand {
+  padding: 0 10px 0 12px;
+  margin-right: 4px;
+  font-size: 13px;
+}
+html.device-phone .side .brand .ic.logo { width: 20px; height: 20px; }
+
+/* The nav is the part that scrolls sideways; brand and logout stay pinned. */
+html.device-phone .side nav {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* `width: 100%` on a nav link would make every item a full-width block in a
+   horizontal strip, so the strip would scroll one item per screen. */
+html.device-phone .side nav a,
+html.device-phone .side .logout,
+html.device-phone .side button {
+  width: auto;
+  flex: 0 0 auto;
+}
+html.device-phone .side .logout {
+  margin: 0 4px;
+  padding: 0 10px;
+}
+
+/* Collapsing is meaningless once the sidebar is a header bar. */
+html.device-phone .side .toggle { display: none; }
+
+html.device-phone .main {
+  flex: 1 1 auto;
+  width: 100%; min-width: 0;
+  padding: 9px 9px 40px;
+}
+
+/* The header row (title + range buttons) must wrap, not compress the title. */
+html.device-phone .top {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 11px 0;
+}
+html.device-phone .top h1 { font-size: 17px; }
+html.device-phone .ranges { width: 100%; }
+
+/* Leases toolbar: the search box had a 280 px min-width inside a 390 px
+   screen with three buttons beside it. Let it take a full row of its own. */
+html.device-phone #lease-q,
+html.device-phone .log-toolbar input { min-width: 0 !important; width: 100%; }
+html.device-phone .row > input { flex: 1 1 100%; }
