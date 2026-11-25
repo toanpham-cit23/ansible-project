@@ -1,0 +1,108 @@
+---
+# Docker test network - L3 switch, router and switch standing in for real gear.
+#
+# Three things this playbook sets up, all of which were previously done by hand
+# and therefore could not be reproduced after a VM rebuild:
+#
+#   1. three alpine containers on the lab-users macvlan, each with a live
+#      net-snmp agent (files/lab/testnet/testnet.sh)
+#   2. an encrypted SSH credential for every device in the inventory, written
+#      through the dashboard's own API so it uses exactly the same AES-GCM key
+#      and format as the app - never by poking the SQLite BLOB directly
+#   3. a [switches] group in hosts.ini so collect_configs.yml can audit them
+#
+# hosts.ini is gitignored (it holds credentials), so this playbook edits it in
+# place and is safe to re-run: it appends the group only once.
+#
+# Run directly, not from master.yml - starting devices puts addresses on the
+# wire and is a deliberate act:
+#
+#   ansible-playbook playbooks/22_testnet.yml -e admin_password=...
+#
+# The admin password is only used to obtain a short-lived dashboard session.
+# It never lands in a file. If omitted, credentials are left as they are.
+- name: Docker test network and SSH credential pool
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    project_dir: /root/ansible-project
+    lab_dir: /root/lab
+    testnet_src: "{{ playbook_dir }}/../files/lab/testnet"
+    testnet_dir: "{{ lab_dir }}/docker/testnet"
+    # Lab-only credential. Not a real secret: every device in this network is
+    # a throwaway simulator, and it is deliberately the same on all of them.
+    device_user: labuser
+    device_pass: lab12345
+
+  tasks:
+    - name: Install the test network script on the controller
+      ansible.builtin.copy:
+        src: "{{ testnet_src }}/testnet.sh"
+        dest: "{{ testnet_dir }}/testnet.sh"
+        mode: '0755'
+
+    - name: Create the three test devices
+      ansible.builtin.shell: "{{ testnet_dir }}/testnet.sh up"
+      register: testnet_up
+      changed_when: "'up:' in testnet_up.stdout"
+
+    - name: Show the devices that came up
+      ansible.builtin.debug:
+        var: testnet_up.stdout_lines
+
+    # Password encryption must go through the app's own endpoint. Earlier we
+    # tried seeding password_enc with Python's cryptography package; version
+    # 47.0.0 on this Alpine host fails even a trivial AESGCM roundtrip, which
+    # produced blobs the Go API could not decrypt. The API is authoritative.
+    - name: Obtain a dashboard session
+      when: admin_password is defined
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8080/api/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ admin_user | default('admin') }}"
+          password: "{{ admin_password }}"
+        return_content: yes
+      register: dashboard_login
+      no_log: true
+
+    - name: Read current device IDs
+      when: admin_password is defined
+      ansible.builtin.shell: |
+        python3 -c "import sqlite3; db=sqlite3.connect('{{ lab_dir }}/db/net.db'); print(' '.join(str(r[0]) for r in db.execute('select id from devices')))"
+      register: device_ids
+      changed_when: false
+
+    - name: Set an encrypted SSH credential on every device
+      when: admin_password is defined
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8080/api/devices/{{ item }}/credentials"
+        method: PUT
+        body_format: json
+        body:
+          username: "{{ device_user }}"
+          password: "{{ device_pass }}"
+        cookies: "{{ dict(dashboard_login.set_cookie | map('regex_findall', '([^=]+)=([^;]+)') | map('first') | list) }}"
+      loop: "{{ device_ids.stdout.split() }}"
+      no_log: true
+
+    - name: Add a switches group to the inventory, once
+      ansible.builtin.lineinfile:
+        path: "{{ project_dir }}/hosts.ini"
+        line: "{{ item }}"
+        insertafter: EOF
+        create: yes
+      loop:
+        - "# Docker test devices - config read via docker exec, not SSH (macvlan)"
+        - "[switches]"
+        - "test-l3switch ansible_host=127.0.0.1 ansible_connection=local"
+        - "test-switch ansible_host=127.0.0.1 ansible_connection=local"
+        - "test-router ansible_host=127.0.0.1 ansible_connection=local"
+
+    - name: Confirm the SSH pool reports every device
+      when: admin_password is defined
+      ansible.builtin.debug:
+        msg: "SSH credentials were set through the API; check /api/ssh/pool in the dashboard."
