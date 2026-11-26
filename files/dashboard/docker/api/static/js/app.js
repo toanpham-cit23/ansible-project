@@ -1062,6 +1062,16 @@ function devLiveness(n) {
   return 'unknown';
 }
 
+// A device's class is 'unknown' until something identifies it, and a box with
+// no SNMP agent may never get one. Printing the database's word for that put
+// "Lab · unknown" on six cards, which reads like a broken lookup rather than
+// a fact about the device. Say what was actually observed, and say why.
+function devKindLabel(n) {
+  const k = (n && n.effective_kind) || 'unknown';
+  if (k !== 'unknown') return k;
+  return devLiveness(n) === 'blind' ? 'unclassified' : 'unknown';
+}
+
 function devStatePill(n) {
   const s = devLiveness(n);
   if (s === 'up') return '<span class="pill up">up</span>';
@@ -1624,7 +1634,22 @@ const views = {
   async dashboard() {
     const devs = await api.get('/api/devices');
     state.devices = devs;
-    for (const d of devs) d._h = await api.get(`/api/devices/${d.id}/health?range=${state.range}`);
+    // One request per device, in parallel. Awaiting inside the loop made the
+    // dashboard take as long as the sum of every request - 16 devices at
+    // ~410 ms each was 6.5 s of waiting, and 9.7 s end to end, so the view
+    // rendered nothing at all for the first ten seconds and looked broken.
+    // Promise.all bounds the cost to the single slowest request.
+    await Promise.all(devs.map(async (d) => {
+      try {
+        d._h = await api.get(`/api/devices/${d.id}/health?range=${state.range}`);
+      } catch (e) {
+        // One unreadable device must not blank the whole dashboard: keep the
+        // card and let it render without a sparkline.
+        d._h = [];
+        d._hErr = e && e.message ? e.message : 'health unavailable';
+      }
+      if (!Array.isArray(d._h)) d._h = [];
+    }));
 
     if (state.scope !== 'all' && !devs.some((d) => String(d.id) === String(state.scope))) {
       state.scope = 'all';
@@ -2071,11 +2096,13 @@ const views = {
         <span class="muted" style="margin-left:auto">${data.total} entr${data.total === 1 ? 'y' : 'ies'}</span>
       </div>
       <div class="panel" style="padding:0;overflow:hidden">
+        <div class="table-scroll">
         <table class="log-table">
           <thead><tr><th style="width:150px">Time</th><th style="width:110px">Device</th>
             <th style="width:100px">Level</th><th>Message</th><th style="width:120px">Action</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
+        </div>
       </div>
       <div class="pager">${pager}</div>
       <p class="muted" style="font-size:12px;margin-top:10px">
@@ -2098,7 +2125,7 @@ const views = {
       <div class="card" data-id="${d.id}" data-host="${esc(d.hostname)}">
         <div class="row" style="justify-content:space-between;margin-bottom:11px">
           <div><b style="font-size:15px">${esc(d.hostname)}</b>
-            <div class="muted" style="font-size:12.5px">${esc(d.site || '—')} · ${esc(d.effective_kind)}</div></div>
+            <div class="muted" style="font-size:12.5px">${esc(d.site || '—')} · ${esc(devKindLabel(d))}</div></div>
           ${devStatePill(d)}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">

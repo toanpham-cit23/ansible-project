@@ -1413,6 +1413,10 @@ def cycle(c):
             unanswered.append(d)
 
     new_events = []
+    # Devices this cycle actually deleted. Section 3 runs after the delete loop
+    # and used to write a log_finding for a row that no longer existed, which
+    # raised FOREIGN KEY constraint failed and rolled back the ENTIRE cycle.
+    removed = set()
 
     # ---- 1. health samples, reachability, reboot detection
     for d, state, m, up, ifn, rtt, reachable, method in polled:
@@ -1481,8 +1485,16 @@ def cycle(c):
         # Protected rows are infrastructure. They may flap, but they are never
         # removed by this rule - deleting a router because it was rebooted for
         # three minutes would be an outage caused by the monitoring system.
+        #
+        # "Unidentified" means we can neither name it NOR reach it. A host that
+        # answers ICMP but not SNMP is BLIND, not unidentified: it is provably
+        # on the wire, the operator can see its lease, and the UI already has a
+        # word for it ("unmonitored"). The rule used to fire on those too, so
+        # the six sim workstations - real containers, pinging happily - were
+        # deleted every 180 s, each deletion posting a Telegram alert, and the
+        # next cycle re-created them. Reachability outranks identification.
         if d["kind"] == "unknown" and not (("protected" in d.keys()) and d["protected"]):
-            if state == "up":
+            if state == "up" or reachable == "up":
                 DOWN_SINCE.pop(d["id"], None)
             else:
                 first = DOWN_SINCE.setdefault(d["id"], time.time())
@@ -1499,15 +1511,23 @@ def cycle(c):
                     try:
                         c.execute("DELETE FROM devices WHERE id = ?", (d["id"],))
                     except sqlite3.IntegrityError as e:
+                        # A constraint we did not anticipate must cost one
+                        # deletion, not the cycle. Mark it down and fall through
+                        # to the normal UPDATE so last_reachable is still
+                        # recorded - the old `continue` skipped that and left
+                        # the row half-written.
                         print("cannot remove %s (id %d): %s - marking unreachable instead"
                               % (gone, d["id"], e), flush=True)
-                        c.execute("UPDATE devices SET last_state='down', last_seen=datetime('now') "
-                                  "WHERE id=?", (d["id"],))
                         DOWN_SINCE.pop(d["id"], None)
+                        c.execute("""UPDATE devices
+                                     SET last_state='down', last_reachable='down',
+                                         last_seen=datetime('now')
+                                     WHERE id=?""", (d["id"],))
                         continue
                     DOWN_SINCE.pop(d["id"], None)
                     UPTIME.pop(d["id"], None)
                     LAST_OK.pop(d["id"], None)
+                    removed.add(d["id"])
                     msg = ("[HIGH] %s\nThiết bị không nhận diện được đã không phản hồi "
                            "%d giây, đã xoá khỏi hệ thống (%s)." % (gone, UNKNOWN_TTL_S, d["mgmt_ip"]))
                     tg_ok, tg_err, tg_ch = send_telegram(msg)
@@ -1544,6 +1564,11 @@ def cycle(c):
     # so failures have to be rate-limited here or the table grows by two rows
     # every 5 s for every broken device.
     for d, state, m, up, ifn, rtt, reachable, method in polled:
+        # A row deleted above has no parent any more. Writing a finding for it
+        # raises FOREIGN KEY constraint failed and rolls back everything the
+        # cycle did - the delete, the samples, the state updates.
+        if d["id"] in removed:
+            continue
         if state != "up":
             pat = classify("SNMP timeout: no response", patterns)
             if pat:
@@ -1590,7 +1615,7 @@ def cycle(c):
     LOG_TICK = (LOG_TICK + 1) % max(1, LOG_EVERY_N)
     if due:
         try:
-            n = collect_logs(c, [d for d, st, *_ in polled if st == "up"], patterns)
+            n = collect_logs(c, [d for d, st, *_ in polled if st == "up" and d["id"] not in removed], patterns)
             if n:
                 print("log scan: %d new finding(s)" % n, flush=True)
         except Exception as e:

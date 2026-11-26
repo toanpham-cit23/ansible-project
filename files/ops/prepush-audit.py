@@ -186,6 +186,31 @@ def css_layout_problems(css):
             out.append(("files/dashboard/docker/api/static/css/app.css",
                         ".op-kv span may wrap - labels such as Inventory break "
                         "into one word per line"))
+
+    # A wide table inside a phone viewport must have a horizontal scroll box.
+    # `overflow-x` on <table> itself does nothing - a table box does not honour
+    # it - so the rule looks right and ships broken: 793 px of log rows inside
+    # a 390 px phone, with the Level and Action columns clipped away by the
+    # surrounding .panel { overflow:hidden } and impossible to reach.
+    if "device-phone" in flat:
+        has_box = (".table-scroll" in flat
+                   or "display: block" in flat.split("device-phone .panel > table")[-1][:160])
+        if not has_box:
+            out.append(("files/dashboard/docker/api/static/css/app.css",
+                        "phone tables have no scroll box - a wide table is "
+                        "clipped by the panel and its right columns are "
+                        "unreachable"))
+
+    # A drawing with text in it must not be scaled down to the viewport: the
+    # topology is a fixed 980x565 map with 11-12 px labels, and letting it
+    # shrink to 370 px turned every address into unreadable grey pixels.
+    if "topo-box" in flat and "device-phone" in flat:
+        after = flat.split("device-phone .topo-box")[-1][:220]
+        if "min-width" not in after:
+            out.append(("files/dashboard/docker/api/static/css/app.css",
+                        "phone topology svg is scaled to the viewport - its "
+                        "labels become unreadable; it needs a fixed min-width "
+                        "and a scrolling box"))
     return out
 
 

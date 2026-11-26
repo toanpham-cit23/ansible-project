@@ -713,10 +713,56 @@ html.device-phone .dev-grid,
 html.device-phone .op-feed { grid-template-columns: 1fr !important; }
 html.device-phone .stat-grid .panel { grid-column: auto !important; }
 
+/* A table cannot scroll itself: `overflow-x` on <table> is ignored, and the
+   panel around it is `overflow:hidden`, so a wide log table was simply clipped
+   - 793 px of rows inside a 390 px phone, with the Level and Action columns
+   off-screen and unreachable. The scroll box has to be an ancestor, so the
+   markup wraps the log table in .table-scroll and that is what scrolls. */
+.table-scroll { width: 100%; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
 html.device-phone .op-table-wrap,
 html.device-phone .table-wrap,
-html.device-phone .log-table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-html.device-phone table { min-width: 0; }
+html.device-phone .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* Every OTHER table in the app is a bare child of a .panel, and wrapping each
+   of the dozen call sites by hand is a change that will be forgotten by the
+   next person who adds one. `display: block` on the table itself gives it its
+   own scroll box, which is the documented way to make a table scrollable
+   without an extra element: a block box honours overflow-x, a table box does
+   not. The header row stays put because it is the first block child.
+   `width: max-content` keeps the columns at their natural width instead of
+   squeezing them - squeezing was what produced one word per line. */
+html.device-phone .panel > table,
+html.device-phone .section > table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* The topology is a fixed 980x565 drawing with 11-12 px labels. Scaling it to
+   a 370 px phone turned every address into four grey pixels - the diagram was
+   present, unreadable, and the only way to read it was to guess. A drawing
+   with text in it must not be scaled: keep its natural width and let the box
+   scroll, so the labels stay 12 px and the operator can pan across the map.
+   The box already has overflow:auto, so this is only about refusing the
+   shrink. */
+html.device-phone .topo-box { overflow: auto; }
+html.device-phone .topo-box > svg {
+  width: 980px;
+  min-width: 980px;
+  max-width: none;
+  height: auto;
+}
+/* A table that IS wrapped keeps its natural width - the wrapper scrolls it. */
+html.device-phone .table-scroll > table,
+html.device-phone .table-scroll > table.log-table {
+  display: table;
+  width: 100%;
+  min-width: 640px;
+  max-width: none;
+}
 
 /* Touch targets large enough to actually tap. */
 html.device-phone button, html.device-phone .side a, html.device-phone input {
