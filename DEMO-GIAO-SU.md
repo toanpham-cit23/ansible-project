@@ -3,7 +3,7 @@
 Tài liệu này là thứ tự thao tác trên màn hình, kèm câu nói. Mỗi bước đều
 có bằng chứng đo được, không phải "trông có vẻ đúng".
 
-Thời lượng: **8–10 phút**. Đường dẫn: **http://192.168.23.10:8080**
+Thời lượng: **10–12 phút**. Đường dẫn: **http://192.168.23.10:8080**
 
 ---
 
@@ -55,9 +55,9 @@ cd /root/lab && doas docker compose restart poller
 
 ## 1. Mở đầu — bài toán (1 phút)
 
-> "Đây là hệ thống giám sát cho lab mạng 4 router, 2 switch và 8 máy trạm.
-> Toàn bộ hạ tầng được dựng lại bằng Ansible, nên nếu xoá máy chủ thì chỉ
-> cần chạy lại playbook là có nguyên lab.
+> "Đây là hệ thống giám sát cho lab mạng 3 router, 3 switch và 8 máy trạm,
+> cộng một máy điều khiển — 16 thiết bị. Toàn bộ hạ tầng được dựng lại bằng
+> Ansible, nên nếu xoá máy chủ thì chỉ cần chạy lại playbook là có nguyên lab.
 >
 > Điểm khó không phải là vẽ được sơ đồ. Điểm khó là **hai trang phải nói
 > cùng một sự thật**. Em sẽ bắt đầu bằng đúng chỗ từng bị sai."
@@ -68,17 +68,21 @@ cd /root/lab && doas docker compose restart poller
 
 Mở **tab 1**.
 
-Chỉ vào các ô đếm phía trên sơ đồ. Chúng có ba trạng thái, không phải hai:
+Chỉ vào các ô đếm phía trên sơ đồ. Chúng có bốn trạng thái, không phải hai:
 
-> "Ở đây có ba trạng thái, không phải xanh/đỏ.
+> "Ở đây có bốn trạng thái, không phải xanh/đỏ.
 >
 > **up** — thiết bị trả lời SNMP, em biết cả CPU lẫn RAM.
 > **blind** — thiết bị trả lời ping nhưng không trả lời SNMP. Nó **đang
 > sống**, em chỉ không đọc được thông số. Nếu em gọi nó là 'down' thì sai.
 > **down** — không ping được, thật sự mất.
+> **unknown** — chưa quét lần nào, nên chưa có ý kiến. Không gộp vào 'down'.
 >
 > Trạng thái thứ hai là lý do em không dùng hai màu. Một máy Ubuntu bật
 > nhưng chưa cài snmpd sẽ bị báo đỏ nếu chỉ có hai màu — và báo sai."
+
+Hiện tại trên hệ thống: **15 thiết bị up, 1 blind, 0 down**. Con số này đáng
+nói vì trước đây là 4 up / 12 blind — xem mục 4.
 
 Chỉ vào `controller`, rồi vào `r1`:
 
@@ -101,7 +105,39 @@ curl -s -H "Cookie: $CK" http://192.168.23.10:8080/api/poll
 > "`age_s` là số giây kể từ lần quét xong gần nhất. Cứ refresh vài lần,
 > nó luôn dưới 10. Trước đây con số này là 226 giây — vì 11 thiết bị chết
 > bị quét tuần tự, mỗi cái chờ timeout 8 giây. Giờ quét song song 16 luồng
-> nên vòng lặp giữ được 5 giây. Hiện tại đã tích luỹ hơn 147.000 mẫu."
+> nên vòng lặp giữ được 5 giây. Hiện tại đã tích luỹ hơn 332.000 mẫu."
+
+**Nếu giáo sư hỏi "sao giờ 15/16 mà trước là 4/16?"** — đây là phần kỹ thuật
+đáng nói nhất, vì nó là một lỗi tưởng như không thể sửa:
+
+> "Trước đây 12 máy mô phỏng chỉ trả lời ping, không đọc được số liệu. Em
+> tưởng phải cài SNMP vào từng container. Nhưng gốc rễ khác: image đó chỉ
+> chạy `sleep infinity`.
+>
+> Hai hệ quả. Một: image **không có `sshd`**, nên mọi nút Terminal đều
+> 'connection refused' — không phải phân quyền, mà là không có gì lắng nghe.
+> Hai: `sleep infinity` làm PID 1 thì **không dọn tiến trình con**. SNMP
+> chết là nằm lại thành zombie, và không có gì khởi động lại nó.
+>
+> Cách sửa: dựng image riêng có `sshd` và `snmpd`, và viết một tiến trình
+> canh gác làm PID 1 — cứ 2 giây kiểm tra, cái nào chết thì khởi động lại.
+>
+> Nhưng có một cái bẫy nữa, và đây là chỗ em mất nhiều thời gian nhất.
+> SNMP cứ chết với lỗi 'Error opening specified endpoint'. Trông như lỗi
+> phân quyền. Không phải. Nguyên nhân: phần mềm SNMP đọc **hai** file cấu
+> hình — file mặc định và file mình truyền vào — nên nó thử mở cổng 161
+> **hai lần**, lần thứ hai bị 'địa chỉ đang dùng'. Sửa: chỉ dùng một file.
+>
+> Kết quả: 4/16 → 15/16 thiết bị đọc được số liệu đầy đủ, và 0 zombie."
+
+Nếu muốn chứng minh bằng số:
+
+```sh
+doas python3 /root/lab-sim/simctl.py status
+# -> 8/8 running
+doas docker exec sim-accounting ps -o pid,ppid,stat,comm
+# -> không có dòng nào ở trạng thái Z (zombie)
+```
 
 ---
 
@@ -114,7 +150,7 @@ Mở **tab 2**.
 
 Chỉ vào dòng đếm trên đầu trang:
 
-> "23 địa chỉ đã thấy, 19 đang online. Nhưng điều quan trọng hơn con số:
+> "27 địa chỉ đã thấy, 23 đang online. Nhưng điều quan trọng hơn con số:
 > nó **phải khớp** với trang Monitor."
 
 Đặt hai tab cạnh nhau (hoặc dùng phím tắt chuyển qua lại):
@@ -171,11 +207,11 @@ Nếu muốn chứng minh bằng số:
 
 ```sh
 python3 /root/sync_check.py
-# -> leases rows: 23  devices: 16  compared: 12
+# -> leases rows: 27  devices: 16  compared: 15
 # -> MISMATCHES: 0
 ```
 
-> "Script này so từng địa chỉ một. 12 địa chỉ so được, 0 cái lệch.
+> "Script này so từng địa chỉ một. 15 địa chỉ so được, 0 cái lệch.
 > Nó trả mã thoát 1 nếu có lệch — nên dùng được trong cron hay CI, chứ
 > không chỉ để in ra cho đẹp."
 
@@ -193,7 +229,7 @@ Chỉ vào cột mật khẩu:
 > "Mật khẩu được mã hoá AES-GCM trong SQLite, không nằm dạng chữ thường.
 > Bấm con mắt để xem, có ghi log ai xem."
 
-Bấm **Connect SSH** trên dòng `ssh-demo` (hoặc `sim-fileserver`):
+Bấm **Connect SSH** trên dòng `sim-fileserver` (hoặc `sim-hr`):
 
 > "Đây là terminal thật, không phải giả lập. Nó mở một phiên SSH thật qua
 > WebSocket tới sshd trong container."
@@ -212,21 +248,75 @@ Kết quả: `DEMO_MARKER_42`.
 Gõ thêm:
 
 ```
-id; uname -a
+uptime
+df -h
 ```
 
-> "Đây là user và kernel thật của container đó."
+> "Đây là uptime và dung lượng đĩa thật của container đó."
 
-**Nếu giáo sư hỏi "sao `r1` không vào được?"** — thử bấm `r1`:
+**Rồi bấm `r1` để chứng minh cùng một nút dùng được cho router thật:**
 
-> "Router cấu hình chỉ cho phép khoá công khai, không cho mật khẩu. Nên
-> nút này trả về 502 kèm lý do. Đó là **sự thật về credential**, không
-> phải terminal hỏng. Em cố ý để nó báo đúng như vậy thay vì giả vờ
-> thành công."
+Gõ `show version` → ra `FRRouting 10.6.1 (r1)`.
+
+> "Cùng một ô terminal, nhưng trên router nó chạy cú pháp của router.
+> `show ip ospf neighbor` cũng chạy được — ra láng giềng OSPF đã lên
+> 2 ngày 15 giờ, trạng thái Full."
+
+Gõ `show ip ospf neighbor` để giáo sư thấy.
+
+**Đây là chỗ ăn điểm về bảo mật** — thử phá:
+
+```
+ping 1.1.1.1; reboot
+```
+
+Kết quả: **bị từ chối**. Giải thích:
+
+> "Ô này không phải shell tự do. Nó chỉ cho một danh sách lệnh xem trạng
+> thái. Dấu chấm phẩy bị chặn, nên không thể nối thêm lệnh. Nếu em cho
+> shell tự do thì bất kỳ ai đăng nhập được dashboard cũng thành root trên
+> toàn bộ lab."
+
+Thử thêm: bấm `sim-hr` rồi gõ `show ip route`.
+
+> "Bị từ chối kèm gợi ý. `show` là cú pháp router, máy trạm không có
+> `vtysh`. Em cố ý báo đúng lý do thay vì để nó trả về một lỗi khó hiểu."
 
 ---
 
-## 5. Trang Compliance — cấu hình có bị lệch không (1 phút)
+## 5. Dashboard — chỉ vẽ thiết bị hạ tầng (1 phút)
+
+Chuyển về `#/dashboard`.
+
+> "Trước đây trang này vẽ cả 16 thiết bị. Nhưng 9 máy trạm không có trạng
+> thái định tuyến — chúng không chạy OSPF, không có bảng route, không
+> chuyển mạch gì. Vẽ chúng ở đây chỉ làm loãng thứ đáng nhìn.
+>
+> Giờ trang này chỉ vẽ 7 thiết bị hạ tầng: 1 máy điều khiển, 3 router,
+> 3 switch. 9 máy trạm chuyển sang trang Monitor và trang Leases."
+
+Chỉ vào dòng ghi chú dưới sơ đồ:
+
+> "Và em không im lặng bỏ đi 9 thiết bị đó — có một dòng ghi rõ số lượng
+> và đường dẫn tới hai trang kia. Bỏ mà không nói là cách chắc chắn nhất
+> để người trực ca tưởng thiết bị đã biến mất."
+
+Chỉ vào một thẻ:
+
+> "Thẻ chỉ hiện CPU/RAM/đĩa khi thiết bị **thật sự trả lời SNMP**. Nếu
+> không, thẻ ghi thẳng lý do — 'chưa có mẫu', 'không ping được', hoặc
+> 'SNMP không trả lời' — thay vì để ba dấu gạch ngang. Ba gạch ngang
+> không nói được là máy chết hay máy không cài SNMP."
+
+**Nếu giáo sư hỏi "sao 15/16 mà không phải 16/16?"**
+
+> "Vì một máy là container trình diễn riêng, nằm ngoài dải quản trị của
+> lab. Nó không có SNMP agent và không cần có. Hệ thống báo nó là `blind`
+> — có mặt, không đọc được số liệu — chứ không báo `down`."
+
+---
+
+## 6. Trang Compliance — cấu hình có bị lệch không (1 phút)
 
 Chuyển sang `#/compliance`.
 
@@ -240,7 +330,7 @@ Bấm chạy thu thập, chỉ vào kết quả:
 
 ---
 
-## 6. Điện thoại — cùng một hệ thống, màn hình nhỏ (1 phút)
+## 7. Điện thoại — cùng một hệ thống, màn hình nhỏ (1 phút)
 
 Đây là phần dễ gây ấn tượng nhất nếu giáo sư cầm điện thoại.
 
@@ -278,19 +368,20 @@ cd files/ops && node sweep_layout.js
 
 ---
 
-## 7. Kết — điều đáng nhớ (30 giây)
+## 8. Kết — điều đáng nhớ (30 giây)
 
 > "Ba điều em muốn giáo sư nhớ:
 >
 > **Một:** hạ tầng này dựng lại được. Xoá máy chủ, chạy playbook, có lại
 > lab. Không có bước làm tay nào.
 >
-> **Hai:** hệ thống có ba trạng thái chứ không phải hai. 'Không đọc được'
+> **Hai:** hệ thống có bốn trạng thái chứ không phải hai. 'Không đọc được'
 > khác 'đã chết' — và gộp hai cái đó lại là báo động sai.
 >
-> **Ba:** mọi thứ em vừa nói đều đo được, không phải cảm nhận. 0/12 lệch
-> giữa hai trang. 30/30 bố cục sạch. `age_s` dưới 10 giây. Nếu một con số
-> đó sai, em muốn biết trước giáo sư."
+> **Ba:** mọi thứ em vừa nói đều đo được, không phải cảm nhận. 0/15 lệch
+> giữa hai trang. 30/30 bố cục sạch. 15/16 thiết bị đọc được số liệu.
+> 17/17 lệnh terminal đúng. `age_s` dưới 10 giây. Nếu một con số đó sai,
+> em muốn biết trước giáo sư."
 
 ---
 
@@ -301,7 +392,8 @@ cd files/ops && node sweep_layout.js
 | Trang trắng / không đăng nhập được | `curl -s http://192.168.23.10:8080/healthz` | `cd /root/lab && doas docker compose up -d` |
 | Số liệu không nhích | `curl -s -H "Cookie: $CK" .../api/poll` xem `age_s` | `doas docker compose restart poller` |
 | Monitor báo tất cả down | `doas python3 /root/lab-sim/simctl.py status` | `doas python3 /root/lab-sim/simctl.py shim` rồi `up` |
-| Nút SSH báo 502 | `docker ps --filter name=ssh-demo` | `doas docker start ssh-demo` |
+| Nút SSH báo 502 | `docker ps --filter name=sim-fileserver` | `doas python3 /root/lab-sim/simctl.py up` |
+| Thẻ nào cũng ghi "no sample" | `doas python3 /root/lab-sim/simctl.py status` | `doas python3 /root/lab-sim/simctl.py rebuild` (dựng lại image có sshd + snmpd) |
 | Leases lệch Monitor | `python3 /root/sync_check.py` | xem mục 3 — thường là poller hoặc shim |
 
 ## Phụ lục B — Câu hỏi giáo sư hay hỏi
@@ -319,8 +411,18 @@ cd files/ops && node sweep_layout.js
 > đó là thứ không thể giả được nếu chỉ chụp màn hình."
 
 **"Phần nào khó nhất?"**
-> "Không phải phần code. Phần khó là **tin vào trang nào** khi hai trang
-> nói khác nhau. Em đã mất một buổi đi tìm ARP cũ, trong khi sự thật là
-> Monitor đúng và Leases sai, vì máy chủ không ping được container của
-> chính nó. Bài học: khi hai nguồn lệch nhau, việc đầu tiên là kiểm tra
-> **nguồn nào thật sự đo được**, chứ không phải sửa cái nào trông sai hơn."
+> "Không phải phần code. Hai chỗ khó.
+>
+> Một là **tin vào trang nào** khi hai trang nói khác nhau. Em đã mất một
+> buổi đi tìm ARP cũ, trong khi sự thật là Monitor đúng và Leases sai, vì
+> máy chủ không ping được container của chính nó. Bài học: khi hai nguồn
+> lệch nhau, việc đầu tiên là kiểm tra **nguồn nào thật sự đo được**, chứ
+> không phải sửa cái nào trông sai hơn.
+>
+> Hai là một lỗi mà triệu chứng và nguyên nhân **không liên quan gì nhau**.
+> SNMP báo 'Error opening specified endpoint' — đọc lên thì ai cũng nghĩ
+> lỗi quyền hoặc cổng bị chiếm. Em thử đổi cổng, thử chạy root, đều
+> không được. Cuối cùng phải theo dõi syscall `bind()` mới thấy nó gọi
+> **hai lần** trên cùng một cổng: phần mềm đọc cả file cấu hình mặc định
+> lẫn file mình truyền vào. Bài học: khi triệu chứng không khớp với
+> nguyên nhân, đừng đoán thêm — hãy nhìn xuống tầng thấp hơn."
