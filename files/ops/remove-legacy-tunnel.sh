@@ -170,22 +170,55 @@ do_remove() {
     skip "cloudflared not installed"
   fi
 
-  # 3. Cron entry for the Cloudflare tunnel, if present.
+  # 3. Cron entries for the Cloudflare tunnel and the DuckDNS A-record updater.
   #
   # The whole ops layer writes to /etc/crontabs/root directly (ops-install.sh,
   # fw-guard.sh, tunnel-install.sh all do). This used to call `crontab -l` and
   # `crontab -`, which reads a *different* store on Alpine/busybox - so the
   # cleanup silently matched nothing and reported success. Read the same file
   # the rest of the layer writes, and back it up before editing.
+  #
+  # tunnel-status.sh must be matched too: it publishes cloudflared.json every
+  # minute, and leaving it behind means the dashboard keeps rewriting "connected"
+  # for a tunnel that no longer exists.
   CRONTAB=/etc/crontabs/root
-  if [ -f "$CRONTAB" ] && grep -q 'tunnel-install\|cloudflared' "$CRONTAB" 2>/dev/null; then
+  TUNNEL_RE='tunnel-install\|tunnel-status\|cloudflared'
+  if [ -f "$CRONTAB" ] && grep -q "$TUNNEL_RE" "$CRONTAB" 2>/dev/null; then
     cp "$CRONTAB" "$BACKUP/crontab.before" && ok "backed up $CRONTAB"
-    grep -v 'tunnel-install\|cloudflared' "$CRONTAB" > "$BACKUP/crontab.new" \
+    grep -v "$TUNNEL_RE" "$CRONTAB" > "$BACKUP/crontab.new" \
       && cat "$BACKUP/crontab.new" > "$CRONTAB" \
-      && ok "removed the Cloudflare tunnel cron line"
+      && ok "removed the Cloudflare tunnel cron lines"
     rc-service crond restart >/dev/null 2>&1 && ok "reloaded crond"
   else
     skip "no Cloudflare tunnel cron line"
+  fi
+
+  # The DuckDNS A record exists to give the tunnel a stable origin. With the
+  # tunnel gone it points at a public IP where nothing listens, so the updater
+  # is dead weight. duckdns.env stays - see step 4.
+  if [ -f "$CRONTAB" ] && grep -q 'duckdns-update.sh' "$CRONTAB" 2>/dev/null; then
+    grep -v 'duckdns-update.sh' "$CRONTAB" > "$BACKUP/crontab.new2" \
+      && cat "$BACKUP/crontab.new2" > "$CRONTAB" \
+      && ok "removed the DuckDNS A-record cron line"
+    rc-service crond restart >/dev/null 2>&1
+  else
+    skip "no separate duckdns-update cron line"
+  fi
+
+  # 3b. The if-up hook was named after DuckDNS when DuckDNS was the only reason
+  #     to react to a link change. Rename rather than delete: it still runs
+  #     network-sync, which keeps the in-lab DNS override pointed at eth0.
+  if [ -f /etc/network/if-up.d/duckdns ]; then
+    cat > /etc/network/if-up.d/lab-network <<'HOOK'
+#!/bin/sh
+[ "$IFACE" = "eth1" ] || exit 0
+/root/lab/ops/network-sync.sh >/dev/null 2>&1
+HOOK
+    chmod +x /etc/network/if-up.d/lab-network
+    rm -f /etc/network/if-up.d/duckdns
+    ok "renamed if-up.d/duckdns -> if-up.d/lab-network"
+  else
+    skip "no if-up.d/duckdns hook"
   fi
 
   # 4. DuckDNS credentials. NOT removed by default - see the header.
