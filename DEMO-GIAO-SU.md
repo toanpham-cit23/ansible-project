@@ -17,15 +17,18 @@ Mở sẵn ba tab, đăng nhập sẵn:
 | 2 | `http://192.168.23.10:8080/#/leases` | Trang Leases |
 | 3 | `http://192.168.23.10:8080/#/database` | Trang Database (nút SSH) |
 
-Đăng nhập: `admin` / `labadmin`.
+Đăng nhập: `admin` / mật khẩu lấy từ `/root/lab/.env` trên controller
+(`LAB_ADMIN_PASSWORD`). Mật khẩu không ghi trong repo vì repo là công khai.
 
 Kiểm tra nhanh ba thứ, nếu sai thì sửa trước khi demo:
 
 ```sh
 # 0. Lấy cookie đăng nhập (mọi lệnh dưới đều cần, vì API không mở công khai)
+#    LAB_PASS lấy từ controller: grep LAB_ADMIN_PASSWORD /root/lab/.env
+LAB_PASS='<mật-khẩu-admin>'
 CK=$(curl -s -i -X POST http://192.168.23.10:8080/api/login \
       -H 'Content-Type: application/json' \
-      -d '{"username":"admin","password":"labadmin"}' \
+      -d "{\"username\":\"admin\",\"password\":\"$LAB_PASS\"}" \
      | grep -i '^set-cookie' | sed 's/.*sess=\([^;]*\).*/sess=\1/')
 
 # 1. poller còn sống và đúng nhịp 5 giây

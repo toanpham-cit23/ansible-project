@@ -26,7 +26,10 @@ import http.cookiejar
 
 BASE = os.environ.get("LAB_BASE", "http://127.0.0.1:8080")
 USER = os.environ.get("ADMIN_USER", "admin")
-PASS = os.environ.get("ADMIN_PASSWORD", "labadmin")
+# No default: the repo is public, so a working password must never live here.
+PASS = os.environ.get("ADMIN_PASSWORD") or os.environ.get("LAB_ADMIN_PASSWORD")
+if not PASS:
+    raise SystemExit("set ADMIN_PASSWORD (see /root/lab/.env on the controller)")
 
 
 def login():

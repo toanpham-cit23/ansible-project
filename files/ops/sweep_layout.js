@@ -22,7 +22,7 @@
  *   msedge --headless=new --remote-debugging-port=9333 \
  *          --user-data-dir=/tmp/edgeprof about:blank
  *   CDP=http://127.0.0.1:9333 LAB=http://192.168.23.10:8080 \
- *   LAB_PASS=labadmin node sweep_layout.js
+ *   LAB_PASS="$LAB_ADMIN_PASSWORD" node sweep_layout.js
  *
  * Exit code is the number of bad rows, capped at 125, so it works in CI.
  */
@@ -31,7 +31,12 @@ const http = require('http');
 const CDP = process.env.CDP || 'http://127.0.0.1:9333';
 const BASE = process.env.LAB || 'http://192.168.23.10:8080';
 const USER = process.env.LAB_USER || 'admin';
-const PASS = process.env.LAB_PASS || 'labadmin';
+// No default: the repo is public. Pass LAB_PASS in the environment.
+const PASS = process.env.LAB_PASS;
+if (!PASS) {
+  console.error('set LAB_PASS (see /root/lab/.env on the controller)');
+  process.exit(2);
+}
 const VIEWS = (process.env.VIEWS ||
   'leases,monitoring,database,dashboard,logs,compliance').split(',');
 const WIDTHS = (process.env.WIDTHS || '390,768,1024,1280,1476').split(',').map(Number);
