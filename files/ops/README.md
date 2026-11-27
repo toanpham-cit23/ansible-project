@@ -325,6 +325,24 @@ snapshot with the ops scripts, `.env` and compose file. Restore remains a
 separate, manually confirmed playbook (`playbooks/14_restore.yml`); the widget
 reports its status but does not trigger it.
 
+## Regression tests
+
+Four suites, each written after a real bug. Run from the repository root:
+
+```sh
+python3 files/ops/test_fw_guard.py             # 6/6 firewall deadline checks
+python3 files/ops/test_audit_css2.py           # 4/4 layout guards
+python3 files/ops/test_poller_unknown_rule.py  # deletion rule respects ICMP
+node    files/ops/test_dashboard_filter.js     # 22 dashboard filter checks
+```
+
+`test_dashboard_filter.js` lifts `isInfra()` and `hasHealth()` out of the
+shipped `app.js` rather than copying them, so it fails when the real logic
+changes. It also asserts the render loop still calls `all.filter(isInfra)` —
+without that, the helpers could be correct and ignored while 16 cards came
+back. Verified by mutation: removing the filter fails 1 check, making
+`hasHealth` always return true fails 6.
+
 ## Where it shows up
 
 - **Status bar**, above every view: DuckDNS, HTTPS, firewall, SQLite size,
