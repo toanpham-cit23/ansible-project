@@ -6,8 +6,9 @@
 //	  * docker/poller/poller.py::arp_entries() walks ipNetToMediaTable on each
 //	    router and collect_leases() writes ip_leases + lease_events(kind='new').
 //	    So first_seen / last_seen / seen_on / MAC / OUI vendor ARE collected.
-//	  * files/ops/network-sync.sh re-syncs DuckDNS A records and the local DNS
-//	    override after an addressing change. It does NOT scan for devices.
+//	  * files/ops/network-sync.sh re-syncs the local DNS override after an
+//	    addressing change (and the DuckDNS A record only while the legacy
+//	    tunnel exists). It does NOT scan for devices.
 //	  * app.html had a "Discovery" menu entry, but it pointed at the Setup
 //	    view (#/setup) whose content is devices + OSPF link proposals + DNS.
 //	    There was no view dedicated to newly seen hosts.

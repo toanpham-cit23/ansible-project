@@ -19,35 +19,7 @@
      so a wide desktop window on a machine reporting a small screen.width was
      classified as a phone: a 1476 px session got the phone shell, which then
      collapsed <main> to 18 px and wrapped every heading one character per line. -->
-<script>
-(function () {
-  var coarse = false;
-  try {
-    coarse = window.matchMedia('(pointer: coarse)').matches ||
-             window.matchMedia('(hover: none)').matches;
-  } catch (e) {
-    coarse = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
-  }
-  var wide = window.innerWidth > 820;
-  var phone = coarse && !wide;
-  if (wide) phone = false;      // a wide viewport always gets the desktop shell
-  document.documentElement.classList.add(phone ? 'device-phone' : 'device-pc');
-  document.documentElement.dataset.input = phone ? 'touch' : 'pointer';
-  window.__labIsPhone = function () { return window.innerWidth <= 820; };
-  /* Rotating a phone or dragging a desktop window across the 820 px line must
-     re-classify, otherwise the page keeps a layout that no longer matches the
-     viewport it is in. */
-  var last = phone;
-  window.addEventListener('resize', function () {
-    var now = window.innerWidth <= 820;
-    if (now === last) return;
-    last = now;
-    var root = document.documentElement;
-    root.classList.toggle('device-phone', now);
-    root.classList.toggle('device-pc', !now);
-  }, { passive: true });
-})();
-</script>
+<script src="/static/js/boot.js?v=1"></script>
 </head>
 <body>
 <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden">

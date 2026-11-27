@@ -830,7 +830,12 @@ async function onClick(e) {
     b.disabled = true;
     b.textContent = '\u2026';
     try {
-      const r = await api.get(`/api/devices/${id}/password`);
+      // Two steps on purpose. The confirm call mints a single-use token bound
+      // to this device; the read call spends it. A script that loops over the
+      // inventory still gets a password per device, but each one is a separate
+      // logged act and the session budget stops a full sweep.
+      const c = await api.post(`/api/devices/${id}/password/confirm`, {});
+      const r = await api.get(`/api/devices/${id}/password?token=${encodeURIComponent(c.token || '')}`);
       cell.dataset.shown = '1';
       cell.innerHTML = `<span class="mono pw-plain">${esc(r.password || '')}</span>
         <button class="act" data-act="pw-copy" data-pw="${esc(r.password || '')}"
@@ -1834,6 +1839,9 @@ const views = {
     const duck = ops.duckdns || {}, tls = ops.tls || {}, fw = ops.firewall || {};
     const net = ops.network || {};
     const tun = ops.cloudflared || {};
+    // Retired = deliberately decommissioned after Pangolin took over :443.
+    // Rendered as a quiet "retired" row, not as a red failure.
+    const isRetired = (o) => o.state === 'retired';
     const tunCell = tun.url
       ? `<a href="${esc(tun.url)}" target="_blank" rel="noopener">${esc(String(tun.url).replace('https://', ''))}</a>`
       : '—';
@@ -1850,17 +1858,18 @@ const views = {
       <div class="op-grid">
         <div class="panel op">
           <div class="p-title">Trust &amp; access</div>
-          ${kv('DuckDNS', duck.ok ? duck.domain + ' · ' + duck.public_ip : duck.state, duck.ok ? 'ok' : 'err')}
+          ${kv('Public access', 'Pangolin · :443', 'ok')}
+          ${isRetired(duck) ? kv('DuckDNS', 'retired') : kv('DuckDNS', duck.ok ? duck.domain + ' · ' + duck.public_ip : duck.state, duck.ok ? 'ok' : 'err')}
           ${kv('HTTPS', tls.ok ? 'issued · ' + String(tls.expires || '').slice(0, 22) : tls.state, tls.ok ? 'ok' : 'err')}
           ${kv('Firewall', fw.state, fw.state === 'active' ? 'ok' : 'err')}
           ${kv('Rollback guard', fw.deadline ? 'armed' : (fw.state === 'active' ? 'confirmed' : 'idle'))}
           ${kv('SQLite', ops.db_size)}
           ${kv('Lab LAN / upstream', (net.lan_ip || '—') + ' / ' + (net.wan_ip || '—'))}
           ${kv('Local DNS override', net.local_override)}
-          <div class="op-kv tunnel-link"><span>Cloudflare tunnel</span>${tunCell}</div>
-          ${kv('Tunnel state', tun.state, tun.ok ? 'ok' : 'err')}
+          ${isRetired(tun) ? '' : `<div class="op-kv tunnel-link"><span>Cloudflare tunnel</span>${tunCell}</div>
+          ${kv('Tunnel state', tun.state, tun.ok ? 'ok' : 'err')}`}
           ${kv('Inventory', (ops.inventory || []).map((n) => n.hostname).join(', '))}
-          <p class="muted" style="font-size:11.5px;margin:7px 0 0">${esc(net.forward_hint || 'Public IP changes are picked up automatically. Port forwarding is configured on the router/VMware host, outside SSH reach.')}</p>
+          <p class="muted" style="font-size:11.5px;margin:7px 0 0">${esc(net.forward_hint || 'Public access is served by Pangolin on :443. The in-lab entry point is the controller on :8443.')}</p>
         </div>
         <div class="panel op">
           <div class="p-title">Backup &amp; restore</div>
@@ -3283,17 +3292,21 @@ async function renderStatusbar() {
   tg = tg || {};
   const duck = d.duckdns || {}, tls = d.tls || {}, fw = d.firewall || {}, bk = d.backup || {};
   const tun = d.cloudflared || {};
-  const duckOk = duck.ok === true ? true : (duck.state === 'unconfigured' ? null : false);
+  // "retired" means the tunnel and the DuckDNS record were deliberately
+  // decommissioned once Pangolin served the site on :443. That is a healthy
+  // state, so it renders neutral instead of red.
+  const retired = (o) => o.state === 'retired';
+  const duckOk = retired(duck) ? null : (duck.ok === true ? true : (duck.state === 'unconfigured' ? null : false));
   const tlsOk = tls.ok === true ? true : (tls.state === 'unconfigured' ? null : false);
   const fwOk = fw.state === 'active' ? true
     : (fw.state === 'pending' || fw.state === 'inactive' || fw.state === 'rolled_back' ? null : false);
   const expiry = tls.expires ? String(tls.expires).slice(4, 16) : 'trusted';
   el.innerHTML = [
-    sbItem('DuckDNS', duckOk, duck.ok ? (duck.public_ip || duck.state) : (duck.state || 'unknown'), duck.message),
+    sbItem('DuckDNS', duckOk, retired(duck) ? 'retired' : (duck.ok ? (duck.public_ip || duck.state) : (duck.state || 'unknown')), duck.message),
     sbItem('HTTPS', tlsOk, tls.ok ? 'valid to ' + expiry : (tls.state || 'not issued'), tls.message),
     sbItem('Firewall', fwOk, fw.state || 'unknown', fw.message),
-    sbItem('Tunnel', tun.ok === true ? true : (tun.state === 'down' ? false : null),
-      tun.ok ? 'connected' : (tun.state || 'unknown'), tun.url || tun.message),
+    sbItem('Tunnel', retired(tun) ? null : (tun.ok === true ? true : (tun.state === 'down' ? false : null)),
+      retired(tun) ? 'retired' : (tun.ok ? 'connected' : (tun.state || 'unknown')), tun.url || tun.message),
     sbItem('SQLite', true, d.db_size || '—', 'Database file size on the controller'),
     sbItem('Backups', bk.ok === true ? true : null, bk.last_snapshot || 'none', bk.message),
     sbItem('Next clearance', true, d.next_clearance || '—', '1 Jan / 1 Jul at 03:00 UTC'),

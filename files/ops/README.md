@@ -16,14 +16,13 @@ re-derived from the scripts.
 | Lab LAN (controller, `eth0`) | `192.168.23.10` | static; the `:8443` TLS listener lives here |
 | Routers | `192.168.23.11` – `.13` | r1, r2, r3 management addresses |
 | Public IP | `118.69.10.174` | the NAT gateway; changes with the ISP |
-| Stable name | `ansiblelabcsn340.duckdns.org` | A record already points at the public IP |
-| HTTPS origin | `https://ansiblelabcsn340.duckdns.org:8443` | LE cert valid to 2026-12-06 |
-| Ephemeral tunnel | `*.trycloudflare.com` | random per restart — read the live value, never a saved one |
+| Public name | `ansible.dpdns.org` → `54.183.47.187` | Pangolin; TLS on `:443`, LE valid to 23/02/2027 |
+| In-lab HTTPS origin | `https://192.168.23.10:8443` | the controller's own listener, LE via DuckDNS DNS-01 |
+| Retired | `ansiblelabcsn340.duckdns.org`, `*.trycloudflare.com` | removed 27/11/2026 — see "Public access" |
 
-The stable name resolving correctly and the site being reachable from outside
-are two different things. **DNS is fine here; the inbound port is not
-forwarded**, so an external browser gets `ERR_CONNECTION_REFUSED` on `:8443`,
-not a name error. See "Port forwarding" below.
+Public access and in-lab access are different paths. `:443` is Pangolin's;
+`:8443` is the controller's own listener and is **not** published to the
+internet. See "Public access" below.
 
 ## Install
 
@@ -39,12 +38,12 @@ initial snapshot. Re-running is safe.
 
 | When | Script | What |
 |---|---|---|
-| every 5 min | `network-sync.sh` | detect public/LAN/upstream addresses, refresh the A record (calls `duckdns-update.sh`) and the local DNS override |
+| every 5 min | `network-sync.sh` | detect public/LAN/upstream addresses and refresh the local DNS override (calls `duckdns-update.sh` only while the legacy tunnel exists) |
 | every minute | `backup-worker.sh` | consume queued snapshot / retention requests |
 | 1 Jan & 1 Jul, 03:00 UTC | `retention.sh --apply` | semi-annual clearance |
 | every minute | `fw-guard.sh guard` | enforce the firewall rollback deadline (180 s) |
-| 02:17 daily | `acme.sh --cron` | renew certificates; runs the reload command when one is renewed |
-| on `eth1` link-up | `/etc/network/if-up.d/duckdns` | sync immediately on a new network instead of waiting for the next tick |
+| 02:17 daily | `acme.sh --cron` | renew the controller's `:8443` certificate; runs the reload command when one is renewed |
+| on `eth1` link-up | `/etc/network/if-up.d/lab-network` | sync immediately on a new network instead of waiting for the next tick |
 
 ## What happens when the network (and public IP) changes
 
@@ -58,99 +57,86 @@ Three addresses are involved, and only one is public:
 
 **Fully automatic, no action needed:**
 
-- The DuckDNS A record follows the public IP (5-minute cron + link-up hook).
+- The public name `ansible.dpdns.org` is answered by Pangolin's authoritative
+  nameservers, not by anything here — an ISP change does not affect it.
 - The certificate is bound to the *name*, not the IP — an IP change never
   invalidates or requires reissuing it. `acme.sh --cron` renews daily when due.
-- The lab's own DNS override for the DuckDNS name follows `eth0`'s actual
-  address, so `https://ansiblelabcsn340.duckdns.org:8443` keeps working inside
-  the lab.
+- The lab's own DNS override for the `:8443` name follows `eth0`'s actual
+  address, so the in-lab HTTPS entry point keeps working after a move.
 
 **Not automatic — the only manual part:**
 
-- **Port forwarding.** Inbound 80/443/8080/8443 on the public IP currently
-  return no response. External access needs `public:8443 → eth1:8443` on the
-  VMware host, plus `host:8443 → public` on your router. Moving to a different
-  network means recreating those two rules on the new network's equipment;
-  that cannot be done from inside the VM over SSH. `network-sync.sh` writes the
-  current target addresses into `/data/ops/network.json` and the dashboard's
-  *Trust & access* widget shows them.
-- If the ISP puts you behind **CGNAT** (`100.64.0.0/10`), inbound forwarding is
-  impossible. Use a tunnel instead — Cloudflare Tunnel, Tailscale Funnel or
-  ngrok — which initiates outbound and needs no port forward at all.
+- **Getting traffic to Pangolin.** Pangolin forwards to the controller on
+  `:8080`; if the upstream address changes, the connector and its route have to
+  be checked in the Pangolin dashboard. Nothing on the controller can do that.
+  `network-sync.sh` writes the current addresses into `/data/ops/network.json`
+  and the *Trust & access* widget shows them.
 
-## Cloudflare Quick Tunnel — external access with no port forward
+## Public access — Pangolin on :443 (the tunnel is retired)
 
-A DuckDNS name alone does not make the site reachable: it resolves to the
-public IP, where inbound 8443 is not forwarded. `lab-tunnel` solves that by
-dialing **outbound** to Cloudflare, so NAT and CGNAT are irrelevant.
+The site is reached at **`https://ansible.dpdns.org`**, served by Pangolin:
 
-```sh
-/root/lab/ops/tunnel-install.sh      # install/start (idempotent)
-rc-service lab-tunnel status
-tail -20 /var/log/lab-tunnel.log
-cat /root/lab/db/ops/cloudflared.json   # current URL + health
+```
+DigitalPlat (ansible.dpdns.org)  NS -> ns1/ns2/ns3.pangolin-ns.net
+Pangolin Cloud                   A -> 54.183.47.187
+                                 TLS -> LE YR1, CN=*.ansible.dpdns.org (+ apex)
+                                 forwards to the controller, HTTP, port 8080
 ```
 
-- Installs the static `cloudflared` build (Alpine has no package for it).
-- Runs an OpenRC service, enabled at boot; `tunnel-status.sh` publishes the
-  current URL to `/data/ops/cloudflared.json` every minute and the dashboard
-  shows it in the status bar and the *Trust & access* widget.
-- The origin is `https://ansiblelabcsn340.duckdns.org:8443`, with that name pinned to
-  `127.0.0.1` in the controller's `/etc/hosts`. cloudflared therefore verifies
-  the real Let's Encrypt certificate, and the API still sees a TLS request —
-  so `Secure` cookies and HSTS survive the tunnel instead of being downgraded
-  to plain HTTP.
-- This is a **Quick Tunnel**: the `*.trycloudflare.com` URL is random and
-  changes whenever the service restarts. That is why the current URL is
-  surfaced in the dashboard rather than hardcoded anywhere.
+Verified 27/11/2026: `https://ansible.dpdns.org/` → HTTP 200 with the dashboard
+markup, certificate `CN=*.ansible.dpdns.org`, valid to 23/02/2027. Pangolin
+issues and renews that certificate; nothing on this controller is involved.
 
-  **A saved Quick Tunnel URL does not survive a restart.** Cloudflare reclaims
-  the name, so an old bookmark fails with `ERR_NAME_NOT_RESOLVED` — DNS says
-  the name does not exist — not `ERR_CONNECTION_REFUSED`, which would mean the
-  name resolves but nothing is listening. If a colleague's link stops working
-  and the browser reports `DNS_PROBE_FINISHED_NXDOMAIN` or
-  `ERR_NAME_NOT_RESOLVED`, the tunnel moved; read the current URL from
-  `/root/lab/db/ops/cloudflared.json` or the dashboard, and do not "fix" it by
-  editing DNS. The stable name for this lab is
-  `ansiblelabcsn340.duckdns.org`, which resolves to `118.69.10.174` and is
-  unaffected by tunnel restarts.
+**The Cloudflare Quick Tunnel and the DuckDNS A record were retired on the same
+day** because they had become a second, unused path to the same site. Remove
+them with:
 
-For a **stable hostname** on your own domain, replace it with a named tunnel:
-`cloudflared tunnel login` (browser OAuth), then `cloudflared tunnel create`,
-a `config.yml` with ingress rules, and `TUNNEL_TOKEN` / the origin certificate.
-That needs a Cloudflare account and a zone you control — a DuckDNS subdomain
-cannot be used because its nameservers cannot be delegated to Cloudflare.
+```sh
+sh /root/lab/ops/remove-legacy-tunnel.sh --check   # report only
+sh /root/lab/ops/remove-legacy-tunnel.sh           # remove, with backups
+sh /root/lab/ops/remove-legacy-tunnel.sh --rollback
+```
 
-Verified end to end from the workstation: `/healthz` → HTTP 200 `{"ok":true}`,
-`/app` → HTTP 200 with dashboard markup, `.NET` validated the Cloudflare
-certificate chain, and `POST /api/login` returned
-`HttpOnly; Secure; SameSite=Strict` plus HSTS.
+The script refuses to remove anything unless the dpdns name answers **without**
+the tunnel (exit 2), because that is the only thing standing between "cleanup"
+and "site down". It backs everything up to
+`/root/lab/.local-backups/tunnel-removal-<UTC>/`, re-checks reachability
+afterwards, and marks `cloudflared` and `duckdns` as `retired` in the dashboard
+so they stop showing as red failures.
 
-### Why the browser says "refused to connect" from the workstation
+`tunnel-install.sh`, `tunnel-status.sh` and `lab-tunnel.initd` are no longer
+deployed by `playbooks/21_ops.yml`. Set `legacy_tunnel: true` to bring them back.
 
-The DuckDNS name resolves to the **public** IP `118.69.10.174`. There is no
-port forward there, so TCP :8443 is refused — `ERR_CONNECTION_REFUSED`. The
-certificate and the :8443 listener are both fine; a TLS handshake directly to
-`192.168.23.10:8443` with SNI `ansiblelabcsn340.duckdns.org` succeeds with
-TLS 1.3 and a matching CN.
+### Two certificates, do not confuse them
 
-The local DNS override lives in the **lab's own DNS responder** (UDP 53 on the
-controller). It helps lab devices that use that resolver. A normal Windows
-workstation uses its usual DNS and resolves the name to the public IP, so the
-override does not apply to the browser.
+| Where | Name | Renewed by | Needs |
+|---|---|---|---|
+| public `:443` | `*.ansible.dpdns.org` | Pangolin | nothing on the controller |
+| controller `:8443` | `<sub>.duckdns.org` | `acme.sh --cron` + `dns_duckdns` | `duckdns.env` |
+
+`duckdns.env` is therefore **kept** by the removal script even though the
+DuckDNS *record* is retired: it is the only credential that can renew the
+controller's own `:8443` certificate. Deleting it stops that renewal silently —
+`--drop-duckdns-credentials` is opt-in and says so. If `:8443` is ever dropped,
+the file can go too.
+
+### Why a browser may still say "refused to connect"
+
+`:8443` is not published to the internet; only Pangolin's `:443` is. A TLS
+handshake directly to `192.168.23.10:8443` with SNI `<sub>.duckdns.org`
+succeeds with TLS 1.3 and a matching CN, so the listener and certificate are
+fine — there is simply no inbound path to that port from outside.
 
 For LAN-only use, add one line to the workstation's
 `C:\Windows\System32\drivers\etc\hosts` (needs an elevated editor):
 
 ```
-192.168.23.10 ansiblelabcsn340.duckdns.org
+192.168.23.10 <sub>.duckdns.org
 ```
 
-Then `https://ansiblelabcsn340.duckdns.org:8443` opens with the trusted
-certificate and no warning. `eth0` is static, so this address is stable; `eth1`
-is DHCP and should not be used here. Remove the line once real port forwarding
-is in place, otherwise that PC will always resolve the name to the private
-address even from another network.
+Then `https://<sub>.duckdns.org:8443` opens with the trusted certificate and no
+warning. `eth0` is static, so this address is stable; `eth1` is DHCP and should
+not be used here.
 
 ## Trusted HTTPS — one command once the credentials exist
 
@@ -158,10 +144,13 @@ address even from another network.
 Inbound 80/443/8080/8443 on the public IP `118.69.10.174` were all tested and
 return no response, so HTTP-01 is impossible here and DNS-01 is the only path.
 
-**This lab is already configured** with `ansiblelabcsn340.duckdns.org`, whose
-Let's Encrypt certificate is valid through 2026-12-06 and renews on its own.
-The steps below are what was run once, and are kept for a rebuild — on an
-existing install there is nothing to do.
+This is the **controller's own `:8443`** certificate. The public site on `:443`
+is a different certificate, issued and renewed by Pangolin — see "Two
+certificates" above.
+
+**This lab is already configured.** The steps below are what was run once, and
+are kept for a rebuild — on an existing install there is nothing to do, and
+`duckdns.env` is already present on the controller.
 
 **You need a free DuckDNS account.** Sign in at <https://www.duckdns.org>,
 create a subdomain, and copy the token from the dashboard. Then, over SSH:
@@ -182,7 +171,7 @@ The helper:
 
 1. Verifies the token against DuckDNS with a real update — a typo changes nothing
 2. Writes `duckdns.env` at mode 0600
-3. Syncs the public IP (`duckdns-update.sh`, also on a 5-minute cron)
+3. Syncs the public IP (`duckdns-update.sh`)
 4. Issues a Let's Encrypt certificate with `acme.sh --dns dns_duckdns`
    (the plugin's variable is `DuckDNS_Token`, confirmed against the installed
    `/usr/share/acme.sh/dnsapi/dns_duckdns.sh`)
@@ -197,10 +186,9 @@ The helper:
 `acme.sh` installs its own renewal cron. Renewal re-runs the reload command,
 which restarts the API so the new certificate is picked up.
 
-**Still required outside SSH:** forwarding public 443 to the controller for
-external clients. That is a hypervisor/router change, not something this repo
-can do. Inside the lab, `https://ansiblelabcsn340.duckdns.org:8443` works via
-the local DNS override.
+Inside the lab, `https://<sub>.duckdns.org:8443` works via the local DNS
+override. From outside, use `https://ansible.dpdns.org` — the `:8443` listener
+is not published.
 
 ## Firewall
 
@@ -345,9 +333,65 @@ back. Verified by mutation: removing the filter fails 1 check, making
 
 ## Where it shows up
 
-- **Status bar**, above every view: DuckDNS, HTTPS, firewall, SQLite size,
-  backups, next clearance
+- **Status bar**, above every view: public access, DuckDNS (or "retired"),
+  HTTPS, firewall, tunnel (hidden once retired), SQLite size, backups,
+  next clearance
 - **Dashboard → Operations**: trust/access, backup & restore, maintenance &
   retention, node telemetry, alerts & audit feed
 - **Node cards**: live SSH/22 indicator and a Terminal console button
 - **Gap analysis** (separate nav section): the structural audit and open items
+
+## Device credential reveal — two steps, on purpose
+
+`GET /api/devices/{id}/password` used to return a decrypted password on demand,
+which meant one line in DevTools could sweep every device:
+
+```js
+for (let i = 1; i <= 16; i++) fetch('/api/devices/' + i + '/password')
+```
+
+It now takes two calls, in `reveal.go`:
+
+| Call | Purpose |
+|---|---|
+| `POST /api/devices/{id}/password/confirm` | mints a token bound to `(user, device)` |
+| `GET /api/devices/{id}/password?token=…` | returns the password once, then burns the token |
+
+- **Single use.** The token is consumed before the match is checked, so a
+  replayed request fails even with the right value.
+- **60-second TTL** (`revealTokenTTL`), swept on each issue.
+- **Per-session budget** of 12 reveals (`passwordRevealMax`), reset on login.
+  A 16-device sweep stops at 12 with `429`.
+- **Bound to the pair**, so a token for `device 3` is useless for `device 4`,
+  and one minted for your session is useless in someone else's.
+
+Tests: `go test -run Reveal ./...` — 9 cases covering each of the above, plus a
+source-level CSP assertion that rejects `'unsafe-inline'`/`'unsafe-eval'` in
+`script-src`.
+
+The UI does this transparently: the reveal button makes both calls, so nothing
+in the normal flow changes. This raises the cost of a scripted sweep; it does
+not make a stolen session harmless — see the security headers below.
+
+## Security headers
+
+Set in `main.go` for every response:
+
+| Header | Value |
+|---|---|
+| `Content-Security-Policy` | `default-src 'self'` … `script-src 'self'`, `frame-ancestors 'none'`, `object-src 'none'` |
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `no-referrer` |
+| `Permissions-Policy` | `geolocation=(), microphone=(), camera=()` |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` — TLS requests only |
+
+`script-src 'self'` means **no inline scripts**. That is why the phone/desktop
+classification lives in `/static/js/boot.js` rather than a `<script>` block: one
+inline script would have forced `'unsafe-inline'` and made the whole directive
+decorative. `style-src` keeps `'unsafe-inline'` because views set `style="…"`
+on chart bars — a styling risk, not a script-execution one.
+
+Blocking DevTools is not attempted. The browser belongs to the visitor, so a
+key-block is theatre: it breaks screen readers and your own debugging, and
+`curl` ignores it. The only boundary that means anything is the server's.

@@ -379,6 +379,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rateClear(ip)
+	resetRevealBudget(id)
 	jti := randomToken(16)
 	if _, err := db.Exec(`INSERT INTO sessions(jti, user_id, expires_at, ip, ua)
 	                      VALUES (?,?,datetime('now', ?),?,?)`,
@@ -1320,6 +1321,9 @@ func main() {
 	mux.HandleFunc("GET /api/ssh/session/{id}", withAdmin(handleSSHSession))
 	// Reveal one device's password on demand (demo use). Admin only, logged.
 	mux.HandleFunc("GET /api/devices/{id}/password", withAdmin(handleDevicePassword))
+	// The reveal is a two-step act: confirm first, then read. See reveal.go for
+	// why an admin-only button was not enough on its own.
+	mux.HandleFunc("POST /api/devices/{id}/password/confirm", withAdmin(handlePasswordConfirm))
 	mux.HandleFunc("PATCH /api/devices/{id}", withAdmin(handlePatchDevice))
 	mux.HandleFunc("PUT /api/devices/{id}/credentials", withAdmin(handleCredentials))
 	mux.HandleFunc("GET /api/devices/{id}/health", withUser(handleDeviceHealth))
@@ -1416,12 +1420,43 @@ func main() {
 	mux.HandleFunc("GET /app", noStore("app.html"))
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 
-	// One handler for both listeners. HSTS is only emitted for requests that
-	// actually arrived over TLS - sending it on plain HTTP would be ignored by
-	// browsers but would look like a promise the :8080 listener cannot keep.
+	// One handler for both listeners.
+	//
+	// The headers below are the whole answer to "what stops someone who opens
+	// DevTools". They do not stop DevTools - nothing can - but they remove the
+	// things an attacker would use it *for*:
+	//
+	//   CSP          stops injected or edited script from calling the API, and
+	//                stops the page being framed for clickjacking. script-src
+	//                has no 'unsafe-inline' and no 'unsafe-eval', which is why
+	//                the device-classification script was moved to boot.js.
+	//                style-src keeps 'unsafe-inline' because the views set
+	//                style="..." attributes on chart bars; that is a styling
+	//                risk only, not a script-execution one.
+	//   nosniff      stops the browser guessing a .txt is JavaScript.
+	//   no-referrer  stops the lab URL leaking to any external link.
+	//   frame-options  belt-and-braces with CSP frame-ancestors for old clients.
+	//   HSTS         only over TLS: promising it on plain HTTP would be a lie
+	//                the :8080 listener cannot keep.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self'; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; "+
+				"font-src 'self' data:; "+
+				"connect-src 'self'; "+
+				"frame-ancestors 'none'; "+
+				"base-uri 'self'; "+
+				"form-action 'self'; "+
+				"object-src 'none'")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 		if r.TLS != nil {
-			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 		mux.ServeHTTP(w, r)
 	})

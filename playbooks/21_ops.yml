@@ -27,15 +27,19 @@
       - duckdns-update.sh
       - duckdns-setup.sh
       - network-sync.sh
-      - tunnel-status.sh
-      - tunnel-install.sh
-      - lab-tunnel.initd
+      - remove-legacy-tunnel.sh
       - fw-guard.sh
       - ops-install.sh
       - retention.sh
       - snapshot.sh
       - status.py
       - retention.py
+
+    # The Cloudflare Quick Tunnel is retired: https://ansible.dpdns.org answers
+    # directly (verified 27/11/2026, HTTP 200 from 54.183.47.187, not a
+    # Cloudflare address), so the tunnel was only a fallback. Its installer and
+    # initd are no longer deployed. Set this to true only to bring it back.
+    legacy_tunnel: false
 
   tasks:
     - name: Install the operations scripts
@@ -68,15 +72,18 @@
       register: ops_install
       changed_when: false
 
-    - name: Ensure the Cloudflare tunnel is running
-      # Only install/start when the service is missing or down. Re-running the
-      # installer on a healthy tunnel would restart it and change the URL.
+    - name: Ensure the legacy Cloudflare tunnel is absent
+      # Off by default. The dpdns name serves the site directly, so the tunnel
+      # is dead weight and one more outbound connection to explain. The removal
+      # script refuses to run if the public name does not answer without it.
       ansible.builtin.shell: |
-        rc-service lab-tunnel status >/dev/null 2>&1 || sh {{ lab_dir }}/ops/tunnel-install.sh
+        sh {{ lab_dir }}/ops/remove-legacy-tunnel.sh
       args:
         executable: /bin/sh
-      register: tunnel_boot
-      changed_when: false
+      when: legacy_tunnel | default(false) | bool
+      register: tunnel_removal
+      changed_when: "'deleted' in tunnel_removal.stdout or 'removed' in tunnel_removal.stdout"
+      failed_when: tunnel_removal.rc not in [0, 2]
 
     - name: Report
       ansible.builtin.debug:

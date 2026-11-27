@@ -229,10 +229,39 @@ func handleSSHSession(w http.ResponseWriter, r *http.Request, u *User) {
 // This exists only so the Database view can reveal a password on demand for a
 // demo. Admin-only, logged on every call, and the value is sent only after the
 // operator clicks. A viewer can never reach it.
+//
+// Two additions after the DevTools question, because "admin-only" was doing
+// more work than it could bear:
+//
+//  1. A confirmation token is required. The page must POST to
+//     /api/devices/{id}/password/confirm first and get a short-lived token back,
+//     which it then presents here. Without this, one line in the DevTools console
+//         for (let i=1;i<=16;i++) fetch('/api/devices/'+i+'/password')
+//     dumped every device password in the lab. Now each reveal costs a separate
+//     round trip that is logged, counted, and rate-limited.
+//  2. A per-session reveal budget (passwordRevealMax). A human clicking the eye
+//     icon a few times stays well under it; a script walking the inventory does
+//     not. Exceeding it is logged as a warning, because that is what it is.
+//
+// The plaintext still leaves the server - it has to, the operator asked to see
+// it. The change is that it now leaves deliberately, once, on the record.
 func handleDevicePassword(w http.ResponseWriter, r *http.Request, u *User) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		fail(w, http.StatusBadRequest, "bad device id")
+		return
+	}
+	if !consumePasswordReveal(u.ID) {
+		logEvent(id, "warning", "credential reveal budget exhausted for "+u.Username)
+		fail(w, http.StatusTooManyRequests,
+			"too many reveals in this session - sign in again to reset")
+		return
+	}
+	token := r.URL.Query().Get("token")
+	if !consumeRevealToken(u.ID, id, token) {
+		logEvent(id, "warning", "credential reveal without a confirmation token: "+u.Username)
+		fail(w, http.StatusForbidden,
+			"confirm the reveal first: POST /api/devices/{id}/password/confirm")
 		return
 	}
 	var (
@@ -260,6 +289,31 @@ func handleDevicePassword(w http.ResponseWriter, r *http.Request, u *User) {
 		"hostname": host,
 		"username": uname.String,
 		"password": pw,
+	})
+}
+
+// handlePasswordConfirm issues the one-shot token that handleDevicePassword
+// requires. It is deliberately cheap: no credential is read here, so calling it
+// in a loop leaks nothing and still hits the reveal budget on the next step.
+func handlePasswordConfirm(w http.ResponseWriter, r *http.Request, u *User) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "bad device id")
+		return
+	}
+	var exists int
+	if err := db.QueryRow(`SELECT 1 FROM devices WHERE id = ?`, id).Scan(&exists); err != nil {
+		fail(w, http.StatusNotFound, "no such device")
+		return
+	}
+	tok := issueRevealToken(u.ID, id)
+	if tok == "" {
+		fail(w, http.StatusInternalServerError, "cannot mint a reveal token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token": tok,
+		"ttl_s": int(revealTokenTTL.Seconds()),
 	})
 }
 

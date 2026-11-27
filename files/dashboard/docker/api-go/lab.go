@@ -1801,7 +1801,7 @@ func renderMailHTML(subject, body, to, transport string) string {
 		"{{SOURCE}}":     "lab-api &middot; 192.168.23.10",
 		"{{TRANSPORT}}":  stdhtml.EscapeString(transport),
 		"{{RECIPIENT}}":  stdhtml.EscapeString(to),
-		"{{HOSTNAME}}":   "ansiblelabcsn340.duckdns.org",
+		"{{HOSTNAME}}":   "ansible.dpdns.org",
 	}
 	t := string(b)
 	for k, v := range subs {
@@ -1827,7 +1827,7 @@ func mailSend(to, subject, body string) (ok bool, errText string, transport stri
 		// No-signup HTTPS mail API. The recipient goes in the URL, so this
 		// works for any shift-admin address; each new address needs a one-time
 		// activation click on FormSubmit's side.
-		origin := env("MAIL_API_ORIGIN", "https://ansiblelabcsn340.duckdns.org")
+		origin := env("MAIL_API_ORIGIN", "https://ansible.dpdns.org")
 		u := "https://formsubmit.co/ajax/" + to
 		// Only "message": extra fields become ugly label/value rows in
 		// FormSubmit's wrapper. "basic" is its least decorated template.

@@ -961,7 +961,7 @@ def render_mail_html(subject, body, to_addr, transport):
         "{{SOURCE}}": "lab-poller &middot; 192.168.23.10",
         "{{TRANSPORT}}": esc(transport),
         "{{RECIPIENT}}": esc(to_addr),
-        "{{HOSTNAME}}": "ansiblelabcsn340.duckdns.org",
+        "{{HOSTNAME}}": "ansible.dpdns.org",
     }
     for k, v in subs.items():
         t = t.replace(k, v)
@@ -982,7 +982,7 @@ def _send_via_formsubmit(to_addr, subject, body):
     import urllib.error
 
     origin = os.environ.get("MAIL_API_ORIGIN", "").strip() or \
-        "https://ansiblelabcsn340.duckdns.org"
+        "https://ansible.dpdns.org"
     url = "https://formsubmit.co/ajax/" + urllib.parse.quote(to_addr, safe="@.+-_")
     # Only "message" is sent: extra fields show up as ugly label/value rows in
     # FormSubmit's wrapper. "basic" is its least decorated template.

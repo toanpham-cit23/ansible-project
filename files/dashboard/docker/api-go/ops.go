@@ -349,9 +349,9 @@ func handleOpsGaps(w http.ResponseWriter, r *http.Request, u *User) {
 		{"area": "Per-node disk utilisation", "before": "Served from the health endpoint but not stored per node in health_samples",
 			"after": "Shown where available; a dedicated per-node disk sample is still pending", "status": "partial",
 			"evidence": "health endpoint supplies disk_pct"},
-		{"area": "Public HTTPS", "before": "HTTP on :8080 only",
-			"after":  "TLS listener on :8443 is ready; a trusted certificate needs a DuckDNS token and subdomain",
-			"status": "blocked", "evidence": "certPresent() == " + fmt.Sprint(certPresent())},
+		{"area": "Public HTTPS", "before": "HTTP on :8080 only, reachable from the lab only",
+			"after":  "Pangolin terminates TLS for *.ansible.dpdns.org on :443 and forwards to the API",
+			"status": "closed", "evidence": "cert CN=*.ansible.dpdns.org, LE YR1, valid to 23/02/2027"},
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"gaps": gaps})
 }

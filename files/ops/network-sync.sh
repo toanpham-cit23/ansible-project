@@ -6,11 +6,15 @@
 #
 #   eth0  192.168.23.10   static lab LAN - what lab clients connect to
 #   eth1  192.168.220.x   DHCP, VMware NAT - what the host must forward to
-#   public 118.69.10.174  the NAT gateway - what DuckDNS points at
+#   public 118.69.10.174  the NAT gateway
 #
-# A new network changes the public IP and often the eth1 address. Neither
-# needs a manual edit here: the A record is refreshed and the local DNS
-# override follows eth0, so the trusted name keeps working inside the lab.
+# A new network changes the public IP and often the eth1 address. The local
+# DNS override follows eth0, so the trusted name keeps working inside the lab.
+#
+# The DuckDNS A record is refreshed only while the legacy Cloudflare tunnel
+# still exists. That record existed to give the tunnel a stable origin; with
+# the tunnel retired (see remove-legacy-tunnel.sh) the name points at a port
+# nothing listens on, and updating it would just keep a dead name alive.
 set -u
 
 LAB=/root/lab
@@ -25,8 +29,15 @@ iface_ip() {
 LAN_IP=$(iface_ip eth0)
 WAN_IP=$(iface_ip eth1)
 
-"$OPS/duckdns-update.sh" >/dev/null 2>&1
-PUB=$(python3 -c "import json;print(json.load(open('$D/duckdns.json')).get('public_ip',''))" 2>/dev/null)
+# Legacy path only: keep the DuckDNS name current while the tunnel needs it.
+if [ -x /etc/init.d/lab-tunnel ]; then
+  "$OPS/duckdns-update.sh" >/dev/null 2>&1
+fi
+
+# Public IP is worth reporting either way, and it must not depend on DuckDNS
+# being configured. Query it directly, falling back to the last known value.
+PUB=$(wget -qO- --timeout=8 https://api.ipify.org 2>/dev/null | tr -d '\r\n' | head -c 45)
+[ -n "$PUB" ] || PUB=$(cat "$D/duckdns.ip" 2>/dev/null)
 
 # Keep the lab's own DNS pointing at wherever eth0 actually is. If the VM is
 # moved and the lab subnet changes, the trusted name must not keep pointing at
@@ -50,8 +61,8 @@ db.commit()
   fi
 fi
 
-MSG="Forward public TCP 8443 to ${WAN_IP:-eth1}:8443, then to ${LAN_IP:-eth0}:8443"
+MSG="Public access is served by Pangolin on :443; the in-lab entry point is ${LAN_IP:-eth0}:8443"
 python3 "$S" network ok=true state=synced \
   lan_ip="${LAN_IP:-unknown}" wan_ip="${WAN_IP:-unknown}" public_ip="${PUB:-unknown}" \
   local_override="$OVERRIDE" forward_hint="$MSG" checked_at="$NOW" \
-  message="A record and local override follow address changes automatically"
+  message="Local DNS override follows eth0 automatically"
