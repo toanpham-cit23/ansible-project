@@ -36,12 +36,20 @@ import http.cookiejar
 # ---------------------------------------------------------------- settings
 PARENT = os.environ.get("SIM_PARENT", "eth0")
 NETWORK = os.environ.get("SIM_NETWORK", "lab-users")
-IMAGE = os.environ.get("SIM_IMAGE", "alpine:3.20")
+# Built from files/sim/Dockerfile: alpine + sshd + net-snmp + an entrypoint that
+# supervises both. The stock alpine image has neither daemon, so a simulated PC
+# could not be logged in to and its SNMP agent could die unnoticed.
+IMAGE = os.environ.get("SIM_IMAGE", "lab/simhost:1.0")
+BUILD_DIR = os.environ.get("SIM_BUILD_DIR", os.path.dirname(os.path.abspath(__file__)))
 SUBNET = os.environ.get("SIM_SUBNET", "192.168.23.0/24")
 GATEWAY = os.environ.get("SIM_GATEWAY", "192.168.23.1")
 IPRANGE = os.environ.get("SIM_IPRANGE", "192.168.23.144/28")
 DASHBOARD = os.environ.get("SIM_DASHBOARD", "http://127.0.0.1:8080")
 ENVFILE = os.environ.get("SIM_ENVFILE", "/root/lab/.env")
+# Lab-only credential, the same on every simulated host. Not a secret: these
+# containers exist to be broken on purpose.
+DEV_USER = os.environ.get("SIM_DEV_USER", "root")
+DEV_PASS = os.environ.get("SIM_DEV_PASS", "lab12345")
 ROUTERS = os.environ.get("SIM_ROUTERS", "192.168.23.11 192.168.23.12 192.168.23.13").split()
 
 # slug, friendly name, designed VLAN, MAC, address. Must match LAB.hosts in
@@ -57,19 +65,12 @@ HOSTS = [
     ("camera", "Camera", 90, "02:00:00:00:5A:01", "192.168.23.157"),
 ]
 
-# What a workstation actually does: it keeps touching the network. Pinging the
-# three routers is what makes each of them learn the MAC, and the TCP attempt
-# keeps the entry from looking like a pure ICMP probe.
-#
-# `timeout` wraps the TCP probe deliberately. busybox nc does not always honour
-# -w for a connect that never completes, and a shell that blocks in nc stops
-# pinging - the host then ages out of the router's ARP table while the container
-# still looks healthy. That is exactly how all eight went offline once already.
-LOOP = """while :; do
-  for t in {routers}; do ping -c1 -W1 "$t" >/dev/null 2>&1; done
-  timeout 2 nc -z {first} 22 >/dev/null 2>&1
-  sleep 3
-done""".format(routers=" ".join(ROUTERS), first=ROUTERS[0])
+# The keepalive used to live here as a shell string passed to `docker run ...
+# sh -c LOOP`. It moved into the image's entrypoint.sh when the hosts stopped
+# being plain alpine containers: the same process now has to supervise sshd and
+# snmpd as well, and `sleep infinity` as PID 1 neither reaps nor restarts. The
+# logic is unchanged - ping the routers, one TCP touch - but it is a child of a
+# supervisor instead of the whole container.
 
 
 def sh(args, check=True, capture=True):
@@ -90,6 +91,22 @@ def container(slug):
 def running():
     out = docker("ps", "--format", "{{.Names}}", capture=True).stdout.split()
     return {n for n in out if n.startswith("sim-")}
+
+
+def ensure_image(verbose=True):
+    """Build lab/simhost if it is not there yet.
+
+    The stock alpine image cannot be logged in to and has no SNMP agent, so
+    `docker run alpine sleep infinity` produces a host that answers ping and
+    nothing else. That is the device the dashboard could only ever describe as
+    "reachable, unmonitored". Building once and reusing is cheap; the build is
+    a package install and a COPY.
+    """
+    if docker("image", "inspect", IMAGE, check=False).returncode == 0:
+        return
+    if verbose:
+        print("building %s from %s" % (IMAGE, BUILD_DIR))
+    docker("build", "-t", IMAGE, BUILD_DIR)
 
 
 def ensure_network(verbose=True):
@@ -179,6 +196,7 @@ def restart_policy(cname):
 
 def cmd_up(args):
     ensure_network()
+    ensure_image()
     # Without this the hosts come up and the dashboard cannot see them.
     ensure_shim()
     todo = HOSTS[:args.count] if args.count else HOSTS
@@ -215,9 +233,18 @@ def cmd_up(args):
                # knows why. `unless-stopped` still respects a manual `down`.
                "--restart", "unless-stopped",
                "--network", NETWORK, "--ip", ip, "--mac-address", mac,
-               "--memory", "24m", "--cpus", "0.05",
+               "--memory", "64m", "--cpus", "0.05",
                "--label", "lab.sim=1", "--label", "lab.sim.name=" + name,
-               IMAGE, "sh", "-c", LOOP)
+               # LABEL is the inventory name, not the container id: snmpd
+               # publishes it as sysName and the compliance rule compares the
+               # two. ROUTERS/PEER drive the keepalive that keeps this host in
+               # the routers' ARP tables. ROOT_PW is the credential the
+               # dashboard stores for the Terminal console.
+               "-e", "LABEL=" + slug,
+               "-e", "ROOT_PW=" + DEV_PASS,
+               "-e", "ROUTERS=" + " ".join(ROUTERS),
+               "-e", "PEER=" + ROUTERS[0],
+               IMAGE)
         print("started %-14s %-14s %s" % (cname, ip, mac))
         started += 1
     if not started:
@@ -391,6 +418,41 @@ def cmd_watch(args):
         time.sleep(args.interval)
 
 
+def cmd_rebuild(args):
+    """Replace every simulated host with a container built from the current image.
+
+    `up` is idempotent on purpose: it leaves a running container alone, because
+    restarting a lab on every invocation would be surprising. That also means
+    `up` cannot pick up a new image - a container created from the old
+    `alpine:3.20 sleep infinity` stays exactly as it is. Changing what a
+    simulated host *is* (sshd, snmpd, a supervisor that reaps) therefore needs
+    an explicit rebuild, which is this command.
+
+    The MAC address is preserved, so the routers' ARP entries and the existing
+    leases stay valid; only the container changes underneath.
+    """
+    ensure_network()
+    ensure_image()
+    ensure_shim()
+    todo = HOSTS[:args.count] if args.count else HOSTS
+    for slug, name, vlan, mac, ip in todo:
+        cname = container(slug)
+        docker("rm", "-f", cname, check=False)
+        docker("run", "-d", "--name", cname,
+               "--restart", "unless-stopped",
+               "--network", NETWORK, "--ip", ip, "--mac-address", mac,
+               "--memory", "64m", "--cpus", "0.05",
+               "--label", "lab.sim=1", "--label", "lab.sim.name=" + name,
+               "-e", "LABEL=" + slug,
+               "-e", "ROOT_PW=" + DEV_PASS,
+               "-e", "ROUTERS=" + " ".join(ROUTERS),
+               "-e", "PEER=" + ROUTERS[0],
+               IMAGE)
+        print("rebuilt %-14s %-14s %s" % (cname, ip, mac))
+    print("\nsshd and snmpd are up on each host; the routers learn the MACs within a poll cycle.")
+    print("check with: %s status" % sys.argv[0])
+
+
 def main():
     p = argparse.ArgumentParser(description="Docker-based user simulator for the lab")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -402,6 +464,11 @@ def main():
     down = sub.add_parser("down", help="stop and remove them")
     down.add_argument("--network", action="store_true", help="also remove the macvlan network")
     down.set_defaults(fn=cmd_down)
+
+    rb = sub.add_parser("rebuild", help="replace every host with one built from the "
+                                       "current image (up leaves running ones alone)")
+    rb.add_argument("count", nargs="?", type=int, default=0, help="how many (default: all)")
+    rb.set_defaults(fn=cmd_rebuild)
 
     st = sub.add_parser("status", help="containers vs leases")
     st.set_defaults(fn=cmd_status)

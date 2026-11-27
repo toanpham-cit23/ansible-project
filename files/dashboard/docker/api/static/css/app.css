@@ -114,6 +114,11 @@ canvas.chart { width: 100%; height: 156px; display: block; cursor: crosshair; }
 canvas.mini { width: 100%; height: 62px; display: block; margin: 6px 0 4px; cursor: crosshair; }
 .dev-nums { display: flex; gap: 10px; font-size: 12.5px; color: var(--muted); }
 .dev-nums b { color: var(--ink); font-weight: 500; }
+/* A device we cannot read has no chart and no numbers, so the card would be
+   two lines tall next to a card with a sparkline. This line keeps the grid
+   even and says why the card is empty instead of leaving a gap that reads as
+   a rendering failure. */
+.dev-nohealth { font-size: 12px; color: var(--muted); padding: 9px 0 4px; }
 
 table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 th { text-align: left; font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 500; padding: 9px 10px; border-bottom: 1px solid var(--line); }

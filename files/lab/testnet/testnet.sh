@@ -35,8 +35,6 @@ SHIM_IP=192.168.23.200/32
 SHIM_ROUTES="192.168.23.144/28 192.168.23.51/32 192.168.23.52/32 192.168.23.53/32"
 DEVICES="test-l3switch:192.168.23.51 test-router:192.168.23.52 test-switch:192.168.23.53"
 WORK=/root/lab/docker/testnet
-SNMPD=/usr/sbin/snmpd
-LIBS="/usr/lib/libnetsnmp.so.45 /usr/lib/libnetsnmpagent.so.45 /usr/lib/libnetsnmpmibs.so.45"
 
 # The host-side shim. Idempotent: every step checks first, so running it twice
 # is harmless and it can be re-applied after a reboot.
@@ -47,7 +45,12 @@ install_shim() {
     ip addr add "$SHIM_IP" dev "$SHIM_DEV"
   ip link set "$SHIM_DEV" up
   for r in $SHIM_ROUTES; do
-    ip route show | grep -q "^$r dev $SHIM_DEV" || ip route add "$r" dev "$SHIM_DEV"
+    # `ip route show | grep` misses routes that exist but are printed with a
+    # different metric or proto, so the add then fails with "RTNETLINK answers:
+    # File exists" - and under `set -e` that killed the whole `up` before a
+    # single container was created. `|| true` makes the step idempotent, which
+    # is what it claims to be.
+    ip route show | grep -q "^$r dev $SHIM_DEV" || ip route add "$r" dev "$SHIM_DEV" 2>/dev/null || true
   done
   echo "shim: $SHIM_DEV ${SHIM_IP} via $PARENT"
 }
@@ -60,33 +63,25 @@ ensure_net() {
   }
 }
 
-# The alpine image cannot fetch packages at runtime on this host (repo access
-# is denied inside the container). Copy the already-installed host binaries in.
-seed_snmp() {
-  name=$1
-  # Use the inventory name, not `hostname` inside the container: docker sets
-  # the container hostname to a short ID, which would write "sysName 3a1f..."
-  # and make every switch fail its compliance rule.
-  label=$2
-  docker cp "$SNMPD" "$name:/usr/sbin/snmpd" >/dev/null 2>&1 || true
-  for lib in $LIBS; do
-    # Replace symlinks with real files: docker cp follows them into a loop.
-    real=$(readlink -f "$lib" 2>/dev/null || echo "$lib")
-    short=$(basename "$lib")
-    docker cp "$real" "$name:/usr/lib/$short" >/dev/null 2>&1 || true
-  done
-  docker exec -e LABEL="$label" "$name" sh -c '
-    mkdir -p /etc/snmp /var/lib/snmp
-    cat > /etc/snmp/snmpd.conf <<EOF
-rocommunity public 192.168.23.0/24
-sysLocation "Lab testnet"
-sysContact admin@lab.local
-sysName $LABEL
-agentAddress udp:161
-EOF
-    pkill snmpd 2>/dev/null || true
-    /usr/sbin/snmpd -c /etc/snmp/snmpd.conf -f >/tmp/snmpd.log 2>&1 &
-  ' >/dev/null 2>&1 || true
+# The test devices now run the same image as the simulated workstations
+# (files/sim/Dockerfile): alpine plus openssh-server, net-snmp and an entrypoint
+# that supervises both.
+#
+# They used to run `alpine:3.20 sleep infinity` with a host-built snmpd copied
+# in at run time, because package repos are unreachable from inside a macvlan
+# container. That had two consequences nobody saw until it was measured:
+#   - no sshd at all, so the Terminal console on a test switch could not open;
+#   - `sleep infinity` as PID 1 does not reap, so when snmpd crashed it stayed
+#     <defunct> for ever and the device answered ping with a silent port 161.
+#     That is the "reachable, unmonitored" state three devices were stuck in.
+# Building the agent into the image removes both, and removes the copy step.
+SIM_IMAGE=${SIM_IMAGE:-lab/simhost:1.0}
+SIM_BUILD_DIR=${SIM_BUILD_DIR:-/root/lab-sim}
+
+ensure_image() {
+  docker image inspect "$SIM_IMAGE" >/dev/null 2>&1 && return 0
+  echo "building $SIM_IMAGE from $SIM_BUILD_DIR"
+  docker build -t "$SIM_IMAGE" "$SIM_BUILD_DIR" >/dev/null
 }
 
 case "${1:-status}" in
@@ -94,13 +89,19 @@ case "${1:-status}" in
     mkdir -p "$WORK"
     ensure_net
     install_shim
-    command -v snmpd >/dev/null 2>&1 || apk add --no-cache net-snmp >/dev/null
+    ensure_image
     for pair in $DEVICES; do
       name=${pair%%:*}; ip=${pair##*:}
       docker rm -f "$name" >/dev/null 2>&1 || true
+      # LABEL is what snmpd publishes as sysName; the compliance rule compares
+      # it with the inventory name, so it must be the inventory name and not
+      # the container id docker assigns.
       docker run -d --name "$name" --network "$NET" --ip "$ip" \
-        alpine:3.20 sleep infinity >/dev/null
-      seed_snmp "$name" "$name"
+        --restart unless-stopped \
+        -e LABEL="$name" -e ROOT_PW="${DEV_PASS:-lab12345}" \
+        -e ROUTERS="${ROUTERS:-192.168.23.11 192.168.23.12 192.168.23.13}" \
+        -e PEER="${PEER:-192.168.23.11}" \
+        "$SIM_IMAGE" >/dev/null
       echo "up: $name at $ip"
     done
     ;;

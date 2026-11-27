@@ -17,6 +17,7 @@
   vars:
     sim_dir: /root/lab-sim
     sim_src: "{{ playbook_dir }}/../files/sim"
+    sim_image: lab/simhost:1.0
 
   tasks:
     - name: Ensure the simulator directory exists
@@ -35,6 +36,22 @@
       ansible.builtin.file:
         path: "{{ sim_dir }}/simctl.py"
         mode: "0755"
+
+    # The hosts are no longer plain `alpine:3.20 sleep infinity`. That image has
+    # no sshd and no init, so a simulated PC could not be logged in to and its
+    # SNMP agent could die into a zombie nobody reaped - which is exactly how
+    # eleven devices sat at "reachable, unmonitored" while looking healthy.
+    # files/sim/Dockerfile builds the replacement; building it here means a
+    # reinstalled controller gets the working image without a manual step.
+    - name: Build the simulated-host image
+      ansible.builtin.command:
+        cmd: docker build -t {{ sim_image }} {{ sim_dir }}
+      register: sim_build
+      changed_when: "'Successfully tagged' in sim_build.stdout or 'naming to' in sim_build.stdout"
+
+    - name: Report the image
+      ansible.builtin.debug:
+        msg: "simulated host image {{ sim_image }} ready ({{ sim_build.stdout_lines[-1] | default('cached') }})"
 
     # The service is what makes a terminated connection real on the wire: it
     # pauses the container whose lease was cut. Without it the lease table says

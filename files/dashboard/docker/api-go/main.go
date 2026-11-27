@@ -875,19 +875,70 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request, u *User) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// What the Terminal console may run. Every entry is a read-only diagnostic:
+// nothing here writes, restarts, installs or deletes. `show ...` is translated
+// to `vtysh -c '...'` further down, so the same list serves FRR routers and
+// plain Linux hosts.
+//
+// ping, traceroute and ip neigh were added because "can this PC reach that PC"
+// is the single most common thing an operator wants to prove in this lab, and
+// the console could not answer it. The argument is still validated: the
+// allowlist matches a prefix, so `ping 192.168.23.11` passes and
+// `ping 8.8.8.8; rm -rf /` does not (the whole string must start with an
+// allowed command, and `;` after a valid prefix is rejected below).
 var allowedCmds = []string{
 	"show ip ospf neighbor", "show ip route summary", "show ip route",
 	"show version", "show interfaces", "show run", "show memory",
-	"uptime", "free -m", "df -h", "ip -br a", "cat /etc/frr/frr.conf",
+	"show ip interface brief", "show ip bgp summary", "show vlan brief",
+	"uptime", "free -m", "df -h", "ip -br a", "ip addr show", "ip route show",
+	"ip neigh show",
+	"cat /etc/frr/frr.conf", "cat /etc/snmp/snmpd.conf", "cat /etc/resolv.conf",
+	"ping", "traceroute", "uname -a", "ps", "netstat -rn", "whoami", "nslookup",
 }
 
+// Deliberately NOT in the list, because each of these has a write mode that a
+// prefix match would let through:
+//   ip route      -> `ip route add/del` changes the routing table
+//   ip addr       -> `ip addr add/del` changes the interface
+//   ip neigh      -> `ip neigh flush` empties the ARP cache
+//   hostname      -> `hostname foo` renames the box
+//   date          -> `date -s ...` sets the clock
+// Only the read-only sub-forms above are allowed. This is a diagnostic
+// console, not a shell.
+
+// A command that reaches the shell must not contain a second one. The prefix
+// check alone would accept "ping 1.1.1.1 && reboot", because it starts with an
+// allowed word. These characters are how a shell chains, redirects or
+// substitutes, and none of them belongs in a diagnostic command.
+var shellMeta = []string{";", "&", "|", "`", "$(", ">", "<", "\n", "\r"}
+
 func cmdAllowed(c string) bool {
+	for _, m := range shellMeta {
+		if strings.Contains(c, m) {
+			return false
+		}
+	}
 	for _, a := range allowedCmds {
 		if c == a || strings.HasPrefix(c, a+" ") {
 			return true
 		}
 	}
 	return false
+}
+
+// vtyshHost reports whether `show ...` makes sense on this device, by asking
+// the inventory rather than guessing from the address. The three lab routers
+// are class 'router' and run FRR; the simulated workstations and the test
+// switches are not, and `show` there is simply not a command.
+func vtyshHost(hostname string) bool {
+	var kind string
+	err := db.QueryRow(`SELECT COALESCE(effective_kind,'') FROM v_inventory
+	                    WHERE hostname = ?`, hostname).Scan(&kind)
+	if err != nil {
+		return false
+	}
+	k := strings.ToLower(kind)
+	return k == "router" || k == "l3switch"
 }
 
 func handleTerminal(w http.ResponseWriter, r *http.Request, u *User) {
@@ -938,8 +989,18 @@ func handleTerminal(w http.ResponseWriter, r *http.Request, u *User) {
 		return
 	}
 
+	// `show ...` is FRR syntax. It only exists on the routers, where it has to
+	// be run through vtysh; on a plain Linux host the same words would be a
+	// command-not-found. The device's class decides, not the command's prefix:
+	// sending `show ip route` to a workstation produced "sh: show: not found",
+	// which reads like a broken console rather than a wrong target.
 	remote := cmd
 	if strings.HasPrefix(cmd, "show") {
+		if !vtyshHost(host) {
+			fail(w, http.StatusBadRequest,
+				"`show ...` is FRR syntax; this device is not a router. Try: ip -br a, ip route show, ping <ip>")
+			return
+		}
 		remote = "vtysh -c '" + strings.ReplaceAll(cmd, "'", "") + "'"
 	}
 

@@ -1072,6 +1072,36 @@ function devKindLabel(n) {
   return devLiveness(n) === 'blind' ? 'unclassified' : 'unknown';
 }
 
+// Which devices belong on the Dashboard at all.
+//
+// The Dashboard is a picture of the network's plumbing: the routers that route,
+// the switches that switch, and the controller that watches them. Endpoints -
+// the eight simulated workstations, the AP, the camera, the NVR, the file
+// server - are deliberately NOT drawn there. They have no SNMP agent, so their
+// cards carried three dashes and a flat sparkline, and sixteen cards of which
+// twelve said "no data" is not a network overview, it is a list of things the
+// monitoring cannot see. They are still fully present in Monitor, Leases,
+// Inventory and Compliance, which is where a host is the subject rather than
+// the context.
+//
+// An endpoint that is nevertheless identified as a switch or router (a stray
+// test device that named itself) still counts: class wins over name.
+const INFRA_KINDS = new Set(['router', 'switch', 'l3switch', 'firewall']);
+
+function isInfra(n) {
+  if (!n) return false;
+  if (n.hostname === 'controller') return true;
+  const k = String((n && n.effective_kind) || '').toLowerCase();
+  return INFRA_KINDS.has(k);
+}
+
+// A card without health data has nothing to plot and nothing to print. Saying
+// so explicitly beats three em dashes and a flat line that looks like a real
+// measurement of zero.
+function hasHealth(n) {
+  return devLiveness(n) === 'up' && Array.isArray(n._h) && n._h.length > 0;
+}
+
 function devStatePill(n) {
   const s = devLiveness(n);
   if (s === 'up') return '<span class="pill up">up</span>';
@@ -1632,14 +1662,23 @@ function logTabs(active) {
 
 const views = {
   async dashboard() {
-    const devs = await api.get('/api/devices');
-    state.devices = devs;
+    const all = await api.get('/api/devices');
+    state.devices = all;
+    // Only the plumbing is drawn here. Endpoints are in Monitor, Leases,
+    // Inventory and Compliance, where a host is the subject of the page.
+    const devs = all.filter(isInfra);
+
     // One request per device, in parallel. Awaiting inside the loop made the
     // dashboard take as long as the sum of every request - 16 devices at
     // ~410 ms each was 6.5 s of waiting, and 9.7 s end to end, so the view
     // rendered nothing at all for the first ten seconds and looked broken.
     // Promise.all bounds the cost to the single slowest request.
-    await Promise.all(devs.map(async (d) => {
+    //
+    // Only devices that can actually answer SNMP are asked for health. A blind
+    // device is by definition SNMP-silent right now, so the request would cost
+    // a timeout to be told what we already know.
+    const wantHealth = devs.filter((d) => devLiveness(d) !== 'blind');
+    await Promise.all(wantHealth.map(async (d) => {
       try {
         d._h = await api.get(`/api/devices/${d.id}/health?range=${state.range}`);
       } catch (e) {
@@ -1650,6 +1689,7 @@ const views = {
       }
       if (!Array.isArray(d._h)) d._h = [];
     }));
+    devs.forEach((d) => { if (!Array.isArray(d._h)) d._h = []; });
 
     if (state.scope !== 'all' && !devs.some((d) => String(d.id) === String(state.scope))) {
       state.scope = 'all';
@@ -1743,6 +1783,21 @@ const views = {
             ? '<span class="muted" style="font-size:11.5px">Unidentified - console disabled</span>'
             : `<button class="act" data-act="term" data-id="${d.id}">Terminal console</button>`);
       const cardCls = lv === 'down' ? ' down unknown' : (lv === 'blind' ? ' blind' : '');
+      // A card with no sample behind it gets no chart and no numbers. Three
+      // dashes and a flat line read as "measured, and it is zero"; the honest
+      // statement is that this device is reachable and we collect nothing from
+      // it. The link still works, which is why it stays on the page at all.
+      const health = hasHealth(d);
+      const plot = health
+        ? `<canvas class="mini" data-dev="${d.id}"></canvas>
+        <div class="dev-nums">
+          <span>CPU <b>${c == null ? '–' : c + '%'}</b></span>
+          <span>MEM <b>${m == null ? '–' : m + '%'}</b></span>
+          <span>DSK <b>${k == null ? '–' : k + '%'}</b></span>
+        </div>`
+        : `<div class="dev-nohealth">${lv === 'blind'
+            ? 'No health data — SNMP not answering on this device'
+            : lv === 'down' ? 'Unreachable' : 'No sample yet'}</div>`;
       return `<div class="dev-card${cardCls}" data-id="${d.id}">
         <div class="dev-head"><b>${esc(d.hostname)}</b>
           <span class="row" style="gap:6px">
@@ -1753,12 +1808,7 @@ const views = {
                 ? '<span class="pill warn" title="Answers ICMP but not SNMP">unmonitored</span>'
                 : '<span class="pill q" title="No response - device not identified">?</span>'}
           </span></div>
-        <canvas class="mini" data-dev="${d.id}"></canvas>
-        <div class="dev-nums">
-          <span>CPU <b>${c == null ? '–' : c + '%'}</b></span>
-          <span>MEM <b>${m == null ? '–' : m + '%'}</b></span>
-          <span>DSK <b>${k == null ? '–' : k + '%'}</b></span>
-        </div>
+        ${plot}
         <div class="dev-foot">
           ${foot}
           <span class="muted mono" style="font-size:11px">${esc(d.mgmt_ip)}</span>
@@ -1766,13 +1816,19 @@ const views = {
       </div>`;
     }).join('');
 
+    const endpoints = all.length - devs.length;
     const devices = `
       <div class="stat-grid">
-        <div class="panel"><div class="p-title">Number of devices</div><div class="p-big">${devs.length}</div></div>
+        <div class="panel"><div class="p-title" title="Routers, switches and the controller">Infrastructure</div><div class="p-big">${devs.length}</div></div>
         <div class="panel ${down ? 'err' : 'ok'}"><div class="p-title">Unavailable</div><div class="p-big">${down}</div></div>
         ${blind ? `<div class="panel warn"><div class="p-title" title="Answers ICMP but not SNMP: the device is up, we just have no health data">Reachable, unmonitored</div><div class="p-big">${blind}</div></div>` : ''}
       </div>
-      <div class="dev-grid">${cards}</div>`;
+      <div class="dev-grid">${cards}</div>
+      ${endpoints ? `<p class="muted" style="font-size:12.5px;margin:11px 2px 0">
+        ${endpoints} endpoint${endpoints === 1 ? '' : 's'} (workstations, AP, camera, NVR, servers)
+        are not drawn here — they carry no routing or switching state.
+        See <a href="#/monitoring">Monitor</a> or <a href="#/leases">Leases</a> for those.
+      </p>` : ''}`;
 
     const bk = ops.backup || {}, ret = ops.retention || {};
     const duck = ops.duckdns || {}, tls = ops.tls || {}, fw = ops.firewall || {};
@@ -1832,7 +1888,7 @@ const views = {
           <div class="p-title">Node telemetry</div>
           <div class="op-table-wrap"><table class="op-table"><thead><tr>
             <th>Node</th><th>SSH</th><th>CPU</th><th>RAM</th><th>RTT</th><th>Uptime</th>
-          </tr></thead><tbody>${(tele.nodes || []).map((n) => {
+          </tr></thead><tbody>${(tele.nodes || []).filter((n) => isInfra({ hostname: n.hostname, effective_kind: n.kind })).map((n) => {
             // The controller is this machine: its SSH probe cannot succeed from
             // inside the container, so "down" there was a false alarm on a node
             // that was simultaneously reporting CPU and RAM. Say "local".
@@ -2164,8 +2220,12 @@ const views = {
           <button class="act primary" data-act="run">Run</button>
         </div>
         <p class="muted" style="font-size:12px;margin-top:8px">
-          Allowed: show ip ospf neighbor · show ip route summary · show version · show interfaces ·
-          show run · uptime · free -m · df -h · ip -br a
+          Read-only diagnostics. On routers: <code>show ip ospf neighbor</code> ·
+          <code>show ip route summary</code> · <code>show version</code> ·
+          <code>show run</code>. On any host: <code>ping &lt;ip&gt;</code> ·
+          <code>ip -br a</code> · <code>ip route show</code> · <code>ip neigh show</code> ·
+          <code>uptime</code> · <code>df -h</code> · <code>cat /etc/snmp/snmpd.conf</code>.
+          Shell chaining (<code>;</code> <code>&amp;&amp;</code> <code>|</code>) is refused.
         </p>
       </div>`;
     $('#view').innerHTML = section('term', 'Remote terminal · ' + d.hostname, body, true);
