@@ -190,6 +190,57 @@ Inside the lab, `https://<sub>.duckdns.org:8443` works via the local DNS
 override. From outside, use `https://ansible.dpdns.org` — the `:8443` listener
 is not published.
 
+### Why HSTS on `:443` needed more than `r.TLS != nil`
+
+Pangolin terminates the public TLS connection and forwards **plain HTTP** to
+`:8080` over the docker bridge, so `r.TLS` is nil on every public request. The
+guard `if r.TLS != nil` therefore never fired on the public site: `:8443` sent
+HSTS and `https://ansible.dpdns.org` did not.
+
+The same cause broke two more things, both silent:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| no `Strict-Transport-Security` on `:443` | `r.TLS` nil behind the proxy | `requestScheme()` reads `X-Forwarded-Proto` |
+| session cookie not `Secure` on the public site | same | `Secure: … \|\| requestScheme(r) == "https"` |
+| **every** public session logged as `172.20.0.1` | `handleLogin` keyed the limiter on `r.RemoteAddr`, the connector's bridge address | `clientIP()` reads `X-Forwarded-For` |
+
+That third row was the dangerous one: ten wrong passwords from a single
+attacker would have locked out **all** public visitors, because they all shared
+one rate-limit key.
+
+The forwarding headers are trusted only when the immediate peer is a proxy we
+run — `TRUSTED_PROXIES`, default `127.0.0.0/8,::1/128,172.20.0.0/16`. It is
+deliberately **not** all of RFC1918: a lab client on `192.168.23.x` reaches
+`:8080` directly, so its `X-Forwarded-For` must be ignored or it could pick its
+own IP and walk past the limiter.
+
+Verified against the live connector (the `pangolin up site` client proxies
+`127.0.0.1:8080` and adds):
+
+```
+Host: ansible.dpdns.org
+X-Forwarded-For: 118.69.10.174
+X-Forwarded-Host: ansible.dpdns.org
+X-Forwarded-Port: 443
+X-Forwarded-Proto: https
+X-Real-Ip: 118.69.10.174
+```
+
+Checks after deploying:
+
+```sh
+# public site - header present
+curl -sD- -o /dev/null https://ansible.dpdns.org/ | grep -i strict-transport
+# plain HTTP and a forged header - header absent
+curl -sD- -o /dev/null http://192.168.23.10:8080/ | grep -i strict-transport
+curl -sD- -o /dev/null -H 'X-Forwarded-Proto: https' http://192.168.23.10:8080/ \
+  | grep -i strict-transport
+```
+
+The regression tests live in `docker/api-go/proxy_test.go` (11 cases).
+
+
 ## Firewall
 
 ```sh
@@ -384,7 +435,7 @@ Set in `main.go` for every response:
 | `X-Frame-Options` | `DENY` |
 | `Referrer-Policy` | `no-referrer` |
 | `Permissions-Policy` | `geolocation=(), microphone=(), camera=()` |
-| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` — TLS requests only |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` — sent whenever the request reached us over TLS, including TLS terminated by Pangolin in front of `:8080` (see above) |
 
 `script-src 'self'` means **no inline scripts**. That is why the phone/desktop
 classification lives in `/static/js/boot.js` rather than a `<script>` block: one

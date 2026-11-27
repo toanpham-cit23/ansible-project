@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -37,6 +38,114 @@ var (
 	tokenTTL     = envInt("TOKEN_TTL", 1800)
 	staticDir    = env("STATIC_DIR", "/app/static")
 )
+
+// ------------------------------------------------------------------ proxy
+// The API never sees the visitor's TLS connection. Pangolin terminates it and
+// forwards plain HTTP over the docker bridge, so r.TLS is nil on every public
+// request. Three things broke because of that:
+//
+//   - HSTS was never sent on https://ansible.dpdns.org, because the guard was
+//     `if r.TLS != nil`.
+//   - the session cookie was not Secure, for the same reason.
+//   - worse: handleLogin keyed the rate limiter on r.RemoteAddr, which is the
+//     connector's bridge address for every visitor. Ten wrong passwords from
+//     one attacker would have locked out the whole public site.
+//
+// So the scheme and the client address are read from the forwarding headers,
+// but only when the immediate peer is a proxy we actually run. If the header
+// were trusted from anyone, a caller could pick its own IP and walk straight
+// past the rate limiter, which is the bug we are fixing.
+//
+// The default is deliberately narrow: the API's own docker bridge (lab_default
+// is 172.20.0.0/16, the connector peers from 172.20.0.1) plus loopback. It is
+// NOT "all of RFC1918" - a lab client on 192.168.23.x reaches :8080 directly,
+// so its X-Forwarded-For must be ignored or it could dodge the limiter.
+// Widen this with TRUSTED_PROXIES only if another hop is added in front.
+var trustedProxies = parseTrustedProxies(env("TRUSTED_PROXIES",
+	"127.0.0.0/8,::1/128,172.20.0.0/16"))
+
+func parseTrustedProxies(spec string) []*net.IPNet {
+	var out []*net.IPNet
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, n, err := net.ParseCIDR(part); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func hostOf(addr string) string {
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
+}
+
+// fromTrustedProxy reports whether the immediate peer is one of our proxies.
+func fromTrustedProxy(r *http.Request) bool {
+	ip := net.ParseIP(hostOf(r.RemoteAddr))
+	if ip == nil {
+		return false
+	}
+	for _, n := range trustedProxies {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// requestScheme is "https" when the request arrived over TLS directly, or when
+// a trusted proxy says it terminated TLS for us.
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if fromTrustedProxy(r) {
+		if p := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); p != "" {
+			return strings.ToLower(p)
+		}
+	}
+	return "http"
+}
+
+// clientIP is the real visitor address. Behind the proxy it comes from
+// X-Forwarded-For, walking right to left and skipping hops that are themselves
+// trusted proxies: the rightmost untrusted entry is the one our proxy appended,
+// and anything a client put further left can be forged.
+func clientIP(r *http.Request) string {
+	direct := hostOf(r.RemoteAddr)
+	if !fromTrustedProxy(r) {
+		return direct
+	}
+	xf := r.Header.Get("X-Forwarded-For")
+	if xf == "" {
+		return direct
+	}
+	parts := strings.Split(xf, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		cand := strings.TrimSpace(parts[i])
+		ip := net.ParseIP(cand)
+		if ip == nil {
+			continue
+		}
+		trusted := false
+		for _, n := range trustedProxies {
+			if n.Contains(ip) {
+				trusted = true
+				break
+			}
+		}
+		if !trusted {
+			return cand
+		}
+	}
+	return direct
+}
 
 func env(k, d string) string {
 	if v := os.Getenv(k); v != "" {
@@ -353,10 +462,10 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
-	ip := r.RemoteAddr
-	if i := strings.LastIndex(ip, ":"); i > 0 {
-		ip = ip[:i]
-	}
+	// Behind the proxy r.RemoteAddr is the connector's bridge address for every
+	// visitor, so keying the limiter on it locked out the whole site after ten
+	// wrong passwords from one person. clientIP() returns the real address.
+	ip := clientIP(r)
 	if rateBlocked(ip) {
 		fail(w, http.StatusTooManyRequests, "too many attempts")
 		return
@@ -389,7 +498,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: "sess", Value: jwtSign(id, jti), Path: "/", MaxAge: tokenTTL,
-		HttpOnly: true, Secure: cookieSecure || r.TLS != nil, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: cookieSecure || requestScheme(r) == "https", SameSite: http.SameSiteStrictMode,
 	})
 	var role, name string
 	_ = db.QueryRow("SELECT username, role FROM users WHERE id = ?", id).Scan(&name, &role)
@@ -1436,8 +1545,12 @@ func main() {
 	//   nosniff      stops the browser guessing a .txt is JavaScript.
 	//   no-referrer  stops the lab URL leaking to any external link.
 	//   frame-options  belt-and-braces with CSP frame-ancestors for old clients.
-	//   HSTS         only over TLS: promising it on plain HTTP would be a lie
-	//                the :8080 listener cannot keep.
+	//   HSTS         only over TLS - including TLS terminated by the proxy in
+	//                front of us, which is the only way the public site on :443
+	//                ever sees it. requestScheme() decides, and it trusts the
+	//                forwarding header only from our own proxies; promising HSTS
+	//                on a plain-HTTP request would be a lie the :8080 listener
+	//                cannot keep.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy",
@@ -1455,7 +1568,7 @@ func main() {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-		if r.TLS != nil {
+		if requestScheme(r) == "https" {
 			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 		mux.ServeHTTP(w, r)
